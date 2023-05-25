@@ -4,7 +4,16 @@
 By C. D. Kilpatrick 2019-05-08
 """
 
-import sys, os, astropy, h5py, bisect, warnings, scipy, glob, re, copy
+import sys
+import os
+import astropy
+import h5py
+import bisect
+import warnings
+import scipy
+import glob
+import re
+import copy
 import numpy as np
 import astropy.constants
 import astropy.units as u
@@ -59,10 +68,10 @@ class sedmachine(object):
             'magsystem': 'abmag',
             'time':'log',
             'dirs': {
-                'filter': 'filters',
-                'figures': 'figures',
-                'tables': 'tables',
-                'models': 'models'
+                'filter': 'data/filters',
+                'models': 'data/models',
+                'figures': 'output/figures',
+                'tables': 'output/tables',
             }
         }
 
@@ -114,6 +123,11 @@ class sedmachine(object):
 
         parser.add_argument('model_file',type=str,
             help='Input model file for sedmachine.py')
+        parser.add_argument('--filters',type=str,default=None,
+            help='Override default to output all filters with input value.')
+        parser.add_argument('--armin',default=False,action='store_true',
+            help='Armin likes the output in this specific format.  '+\
+            'Flag to have it output this way.')
 
         args = parser.parse_args()
 
@@ -150,8 +164,10 @@ class sedmachine(object):
         """
 
         # Read in both models
-        fin1 = h5py.File(self.options['dirs']['models']+'/'+model1, 'r')
-        fin2 = h5py.File(self.options['dirs']['models']+'/'+model2, 'r')
+        f1 = os.path.join(self.options['dirs']['models'],model1)
+        f2 = os.path.join(self.options['dirs']['models'],model2)
+        fin1 = h5py.File(f1, 'r')
+        fin2 = h5py.File(f2, 'r')
 
         # Convert frequency and time info
         nu1 = np.array(fin1['nu'], dtype='d')
@@ -294,7 +310,7 @@ class sedmachine(object):
             
         return(bp)
         
-    def load_passbands(self, passbands):
+    def load_passbands(self, passbands=None):
         """
         Load passbands either from pysynphot or check for an equivalent file in
         the default filter directory.
@@ -587,20 +603,16 @@ def main():
     # Make an object with distance
     kn = sedmachine(distance=1.0e-5)
 
-    # Load generic passbands for HST and JWST
-    passbands = {}
-    for tel in ['hst','jwst']:
-        for inst in kn.filters[tel].keys():
-            if inst in ['acs','wfpc2']: continue
-            for filt in kn.filters[tel][inst]:
-                bandname = f'{tel},{inst},{filt}'
-                if 'hst,' in bandname: bandname=bandname.replace('hst,','')
-                passbands[bandname]=None
-
     kn.load_passbands(passbands)
 
     # load models
     args = kn.add_options()
+
+    # Load filters
+    passbands = args.filters
+    kn.load_passbands(passbands)
+
+    # Load models from model file - see example
     all_models = kn.load_model_file(args.model_file)
 
     for num, model in enumerate(all_models):
@@ -678,16 +690,18 @@ def main():
         kn.phottables[model_name].write(outfile_name, overwrite=True,
             format='ascii.ecsv', formats=formats)
 
-        newtable = copy.copy(kn.phottables[model_name])
-        for key in newtable.keys():
-            if '_' in key:
-                newkey = key.split('_')[-1]
-                newtable.rename_column(key, newkey)
+        if args.armin:
+            newtable = copy.copy(kn.phottables[model_name])
+            for key in newtable.keys():
+                if '_' in key:
+                    newkey = key.split('_')[-1]
+                    newtable.rename_column(key, newkey)
 
-        outdir, armin_file = os.path.split(outfile_name)
-        armin_file = os.path.join(outdir, 'armin_'+armin_file)
-        newtable.write(armin_file, overwrite=True, 
-            format='ascii.commented_header', formats=formats)
+            outdir, armin_file = os.path.split(outfile_name)
+            armin_dir = os.path.join(outdir, 'armin')
+            armin_file = os.path.join(armin_dir, 'armin_'+armin_file)
+            newtable.write(armin_file, overwrite=True, 
+                format='ascii.commented_header', formats=formats)
 
 
 if __name__=='__main__':
