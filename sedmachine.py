@@ -70,7 +70,12 @@ class sedmachine(object):
         # Photometry tables for different phases, object types, models, etc.
         self.phottables = {}
 
-        self.pandeia = '/Users/ckilpatrick/scripts/stsci/pandeia/'
+        if 'PANDEIA' in os.environ.keys():
+            self.pandeia = os.environ['PANDEIA']
+        else:
+            print('WARNING: set PANDEIA environmental variable to '+\
+                'pandeia path if you want to use JWST filters.')
+            self.pandeia = None
 
         # Generic options that might need to be changed
         self.options = {
