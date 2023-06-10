@@ -37,6 +37,15 @@ DAY_TO_S = u.day.to(u.second)
 # Internal dependency
 from common import grb
 
+
+def is_number(x):
+
+    try:
+        float(x)
+        return(True)
+    except:
+        return(False)
+
 class sedmachine(object):
     def __init__(self, distance=1.0e-5):
 
@@ -113,7 +122,10 @@ class sedmachine(object):
                 },
                 'sdss': ['u','g','r','i','z'],
                 'johnson': ['U','B','V','R','I'],
-                'kpno': ['J', 'H', 'K']
+                'kpno': ['J', 'H', 'K'],
+                'ps1': ['g','r','i','z','Y'],
+                'clear': ['Clear'],
+                'ukirt': ['J','H','K']
         }
 
     def add_options(self):
@@ -121,10 +133,16 @@ class sedmachine(object):
         import argparse
         parser = argparse.ArgumentParser()
 
-        parser.add_argument('model_file',type=str,
+        parser.add_argument('--model-file',default=None,type=str,
             help='Input model file for sedmachine.py')
+        parser.add_argument('--models',default=None,nargs='*',type=str,
+            help='Model types to generate [grb,grb_angle,grb170817a,kilonova].')
         parser.add_argument('--filters',type=str,default=None,
             help='Override default to output all filters with input value.')
+        parser.add_argument('--theta-obs',default=0.0,type=float,
+            help='Observation angle for GRB jet we are observing.')
+        parser.add_argument('--instruments',default=None,type=str,
+            help='Comma-separated list of instruments to generate bandpass.')
         parser.add_argument('--armin',default=False,action='store_true',
             help='Armin likes the output in this specific format.  '+\
             'Flag to have it output this way.')
@@ -310,7 +328,7 @@ class sedmachine(object):
             
         return(bp)
         
-    def load_passbands(self, passbands=None):
+    def load_passbands(self, passbands=None, instruments=None):
         """
         Load passbands either from pysynphot or check for an equivalent file in
         the default filter directory.
@@ -326,6 +344,9 @@ class sedmachine(object):
             if passbands:
                 if name not in passbands.keys():
                     continue
+            if instruments:
+                if 'wfc3_uvis' not in instruments:
+                    continue
             bpmodel = S.ObsBandpass(name)
             self.bandpass[add_name] = bpmodel
             self.bandpass_names.append(add_name)
@@ -335,6 +356,9 @@ class sedmachine(object):
             add_name = name.replace(',','_')
             if passbands:
                 if name not in passbands.keys():
+                    continue
+            if instruments:
+                if 'wfc3_ir' not in instruments:
                     continue
             bpmodel = S.ObsBandpass(name)
             self.bandpass[add_name] = bpmodel
@@ -346,6 +370,9 @@ class sedmachine(object):
             if passbands:
                 if name not in passbands.keys():
                     continue
+            if instruments:
+                if 'acs_wfc' not in instruments:
+                    continue
             bpmodel = S.ObsBandpass(name)
             self.bandpass[add_name] = bpmodel
             self.bandpass_names.append(add_name)
@@ -355,6 +382,9 @@ class sedmachine(object):
             add_name = name.replace(',','_')
             if passbands:
                 if name not in passbands.keys():
+                    continue
+            if instruments:
+                if 'acs_sbc' not in instruments:
                     continue
             bpmodel = S.ObsBandpass(name)
             self.bandpass[add_name] = bpmodel
@@ -366,6 +396,9 @@ class sedmachine(object):
             if passbands:
                 if name not in passbands.keys():
                     continue
+            if instruments:
+                if 'jwst_nircam' not in instruments:
+                    continue
             bpmodel = self.get_jwst_filters(name)
             self.bandpass[add_name] = bpmodel
             self.bandpass_names.append(add_name)
@@ -375,6 +408,9 @@ class sedmachine(object):
             add_name = name.replace(',','_')
             if passbands:
                 if name not in passbands.keys():
+                    continue
+            if instruments:
+                if 'jwst_miri' not in instruments:
                     continue
             bpmodel = self.get_jwst_filters(name)
             self.bandpass[add_name] = bpmodel
@@ -386,6 +422,9 @@ class sedmachine(object):
             name = name.replace(',','_')
             if passbands:
                 if name not in passbands.keys():
+                    continue
+            if instruments:
+                if 'swift_uvot' not in instruments:
                     continue
             wave,transmission = np.loadtxt(file, unpack=True)
             bpmodel = S.ArrayBandpass(wave, transmission,
@@ -399,6 +438,9 @@ class sedmachine(object):
             if passbands:
                 if name not in passbands.keys():
                     continue
+            if instruments:
+                if 'johnson' not in instruments:
+                    continue
             bpmodel = S.ObsBandpass(name)
             self.bandpass[add_name] = bpmodel
             self.bandpass_names.append(add_name)
@@ -407,6 +449,9 @@ class sedmachine(object):
             name = 'sdss,'+bp
             if passbands:
                 if name not in passbands.keys():
+                    continue
+            if instruments:
+                if 'sdss' not in instruments:
                     continue
             bpmodel = S.ObsBandpass(name)
             add_name = name.replace(',','_')
@@ -417,27 +462,81 @@ class sedmachine(object):
             if passbands:
                 if name not in passbands.keys():
                     continue
+            if instruments:
+                if 'kpno' not in instruments:
+                    continue
             bpmodel = S.ObsBandpass(name)
             add_name = name.replace(',','_')
             self.bandpass[add_name] = bpmodel
             self.bandpass_names.append(add_name)
-
         print(message.format(source='kpno'))
+        for bp in filters['ps1']:
+            name = 'PS1,'+bp
+            if passbands:
+                if name not in passbands.keys():
+                    continue
+            if instruments:
+                if 'ps1' not in instruments:
+                    continue
+            file = os.path.join(self.options['dirs']['filter'],
+                f'PS1.GPC1.{bp}.dat')
+            wave,transmission = np.loadtxt(file, unpack=True)
+            add_name = name.replace(',','_')
+            bpmodel = S.ArrayBandpass(wave, transmission,
+                name=add_name, waveunits='Angstrom')
+            self.bandpass[add_name] = bpmodel
+            self.bandpass_names.append(add_name)
+        print(message.format(source='PS1'))
+        for bp in filters['ukirt']:
+            name = 'ukirt,'+bp
+            if passbands:
+                if name not in passbands.keys():
+                    continue
+            if instruments:
+                if 'ukirt' not in instruments:
+                    continue
+            file = os.path.join(self.options['dirs']['filter'],
+                f'UKIRT.{bp}.dat')
+            wave,transmission = np.loadtxt(file, unpack=True)
+            add_name = name.replace(',','_')
+            bpmodel = S.ArrayBandpass(wave, transmission,
+                name=add_name, waveunits='Angstrom')
+            self.bandpass[add_name] = bpmodel
+            self.bandpass_names.append(add_name)
+        print(message.format(source='UKIRT'))
+        for bp in filters['clear']:
+            name = bp
+            if passbands:
+                if name not in passbands.keys():
+                    continue
+            if instruments:
+                if 'clear' not in instruments:
+                    continue
+            file = os.path.join(self.options['dirs']['filter'],
+                f'clear.dat')
+            wave,transmission = np.loadtxt(file, unpack=True)
+            add_name = name.replace(',','_')
+            bpmodel = S.ArrayBandpass(wave, transmission,
+                name=add_name, waveunits='Angstrom')
+            self.bandpass[add_name] = bpmodel
+            self.bandpass_names.append(add_name)
+        print(message.format(source='Clear'))
 
         # Now if there are other passbands, load them individually
         # Must be formatted as dict with {name: filename}
-        for bp in passbands.keys():
-            if not passbands[bp]:
-                continue
-            print(message.format(source=bp))
-            file = self.options['dirs']['filter'] + '/' + passbands[bp]
-            wave,transmission = np.loadtxt(file, unpack=True)
-            bpmodel = S.ArrayBandpass(wave, transmission,
-                name=bp, waveunits='Angstrom')
-            self.bandpass[bp] = bpmodel
-            self.bandpass_names.append(bp.replace(',','_'))
+        if passbands:
+            for bp in passbands.keys():
+                if not passbands[bp]:
+                    continue
+                print(message.format(source=bp))
+                file = self.options['dirs']['filter'] + '/' + passbands[bp]
+                wave,transmission = np.loadtxt(file, unpack=True)
+                bpmodel = S.ArrayBandpass(wave, transmission,
+                    name=bp, waveunits='Angstrom')
+                self.bandpass[bp] = bpmodel
+                self.bandpass_names.append(bp.replace(',','_'))
 
-    def find_models(self, model_type='', params={}):
+    def find_models(self, model_types=[], params={}):
         """
         Get a list of models and metadata from models/ directory
         """
@@ -459,8 +558,9 @@ class sedmachine(object):
                     data['mass'] = float(groups[0])
                     data['velocity'] = float(groups[1])
                     data['Xlan'] = str(groups[2])
+                    data['model']=model
                     data.update(params)
-                    model_list.append([data, model])
+                    model_list.append(data)
 
         elif 'grb170817a' in model_type:
             data={'E': 0.15869069395227384,
@@ -476,7 +576,7 @@ class sedmachine(object):
                 'z': 0.0,
                 'type':'grb'}
             data.update(params)
-            model_list=[[data]]
+            model_list=[data]
 
         elif model_type=='grb':
 
@@ -498,10 +598,10 @@ class sedmachine(object):
                     data['type'] = 'grb'
                     data['E'] = 10**(MIN_E + (MAX_E - MIN_E) * float(i)/N_E)
                     data['n'] = 10**(MIN_n + (MAX_n - MIN_n) * float(j)/N_n)
-                    data['theta_obs'] = 0.0#17.0 * np.pi/180.0
+                    data['theta_obs'] = 0.0
                     data.update(params)
 
-                    model_list.append([data])
+                    model_list.append(data)
 
         elif 'grb_angle' in model_type:
 
@@ -522,7 +622,7 @@ class sedmachine(object):
                 data['theta_obs'] = np.arcsin(sin_theta)
                 data.update(params)
 
-                model_list.append([data])
+                model_list.append(data)
 
 
         return(model_list)
@@ -578,7 +678,20 @@ class sedmachine(object):
 
     def load_model_file(self, model_file):
 
-        table = Table.read(model_file, format='ascii.commented_header')
+        if not model_file:
+            return([])
+        elif not os.path.exists(model_file):
+            return([])
+
+        try:
+            table = Table.read(model_file, format='ascii.commented_header')
+        except:
+            print(f'WARNING: could not parse model_file {model_file}')
+            return([])
+
+        if not all([v in table.keys() for v in ['type','name','model']]):
+            print(f'WARNING: {model_file} needs type,name,model columns')
+            return([])
 
         all_models = []
         for row in table:
@@ -586,6 +699,7 @@ class sedmachine(object):
             model = {}
             model['type']=row['type']
             model['name']=row['name']
+            typ=row['type']
 
             if model['type']=='Kasen':
                 model['model']=row['models']
@@ -593,6 +707,8 @@ class sedmachine(object):
                 m1, m2 = row['models'].split(',')
                 model['model1']=m1
                 model['model2']=m2
+            else:
+                print(f'WARNING: could not parse model type {typ}')
 
             all_models.append(model)
 
@@ -603,23 +719,37 @@ def main():
     # Make an object with distance
     kn = sedmachine(distance=1.0e-5)
 
-    kn.load_passbands(passbands)
-
     # load models
     args = kn.add_options()
 
     # Load filters
     passbands = args.filters
-    kn.load_passbands(passbands)
+    if args.instruments:
+        instruments = args.instruments.split(',')
+    else:
+        instruments = args.instruments
+    kn.load_passbands(passbands=passbands,instruments=instruments)
 
     # Load models from model file - see example
-    all_models = kn.load_model_file(args.model_file)
+    params={'theta_obs': args.theta_obs}
+    all_models = []
+    all_models += kn.find_models(model_type=args.models, params=params)
+    all_models += kn.load_model_file(args.model_file)
 
+    nmodels = str(len(all_models)).zfill(4)
     for num, model in enumerate(all_models):
 
-        param_str = ' '.join([str(key)+'='+str(model[key])
-            for key in model.keys()])
-        print('Working on model',num,param_str)
+        param_str = ''
+        for key in model.keys():
+            if is_number(model[key]):
+                val = '%.4e'%float(model[key])
+            else:
+                val = str(model[key])
+            param_str += str(key)+'='+val+' '
+
+        model_num = str(int(num)+1).zfill(4)
+
+        print(f'Working on model {model_num}/{nmodels}: {param_str}')
 
         if model['type']=='Kasen':
             kn.load_kasen_model(model['model'])
@@ -629,15 +759,15 @@ def main():
                 model_name = model['model'].replace('h5','')
 
         elif model['type']=='grb':
-            kn.load_grb(parameters=model[0])
-            E_fmt = '%7.4f' % model[0]['E']
-            n_fmt = '%7.7f' % model[0]['n']
-            theta_fmt = '%7.4f' % model[0]['theta_obs']
+            kn.load_grb(parameters=model)
+            E_fmt = '%7.4f' % model['E']
+            n_fmt = '%7.7f' % model['n']
+            theta_fmt = '%7.4f' % model['theta_obs']
             if 'name' in model.keys():
                 model_name = model['name']
             else:
                 model_name = '{type}_{theta_obs}_{E}_{n}'.format(
-                    type=model[0]['type'], E=E_fmt.strip(),
+                    type=model['type'], E=E_fmt.strip(),
                     n=n_fmt.strip(), theta_obs=theta_fmt.strip())
 
         elif model['type']=='Kasen_double':
