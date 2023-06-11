@@ -1,8 +1,0 @@
-# name            type           models
-gw170817          Kasen_double   knova_d1_n10_m0.035_vk0.15_Xlan1e-2.0.h5,knova_d1_n50_m0.025_vk0.25_fd0.3_Xlan1e-6.0_vs0.32_ns12.0.h5
-red               Kasen          knova_d1_n10_m0.035_vk0.15_Xlan1e-2.0.h5
-blue              Kasen          knova_d1_n50_m0.025_vk0.25_fd0.3_Xlan1e-6.0_vs0.32_ns12.0.h5
-red_m0.025_v0.10  Kasen          knova_d1_n10_m0.025_vk0.10_Xlan1e-2.0.h5
-red_m0.030_v0.10  Kasen          knova_d1_n10_m0.030_vk0.10_Xlan1e-2.0.h5
-red_m0.030_v0.20  Kasen          knova_d1_n10_m0.030_vk0.20_Xlan1e-2.0.h5
-red_m0.035_v0.10  Kasen          knova_d1_n10_m0.035_vk0.10_Xlan1e-2.0.h5

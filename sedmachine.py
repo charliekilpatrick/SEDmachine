@@ -262,12 +262,8 @@ class sedmachine(object):
             'xiN': 1.0,
             'z': 0.00973
         }
-
         # Update parameters if there are any provided
-        if parameters:
-            for key in P.keys():
-                if key in parameters.keys():
-                    P[key] = parameters[key]
+        P.update(parameters)
 
         self.grb_param=P
 
@@ -287,12 +283,11 @@ class sedmachine(object):
         self.Lnu_all = np.zeros((len(self.times), len(self.nu)))
 
         # Construct dummy arrays to hold these data in 1D
-        all_nu = np.array(list(self.nu) * len(self.times))
+        all_nu = np.array(list(self.nu) * len(self.times), dtype=np.longdouble)
         all_times = np.array(sum([[t * DAY_TO_S] * len(self.nu)
-            for t in self.times], []))
+            for t in self.times], []), dtype=np.longdouble)
         all_flux = self.grb_generator.GetSpectral(all_times, all_nu, P)
 
-        # Sanitize flux array for nan (set to zero) and rescale to luminosity
         all_flux = np.array(all_flux)
 
         all_flux[np.isnan(all_flux)] = 0.0
@@ -547,7 +542,7 @@ class sedmachine(object):
         """
 
         model_list = []
-        if 'kilonova' in model_type:
+        if 'kilonova' in model_types:
             model_dir = self.options['dirs']['models']
 
             # Grab all h5 models and resolve their info
@@ -567,7 +562,7 @@ class sedmachine(object):
                     data.update(params)
                     model_list.append(data)
 
-        elif 'grb170817a' in model_type:
+        elif 'grb170817a' in model_types:
             data={'E': 0.15869069395227384,
                 'Eta0': 7.973477192135503,
                 'GammaB': 11.000923300022666,
@@ -583,7 +578,7 @@ class sedmachine(object):
             data.update(params)
             model_list=[data]
 
-        elif model_type=='grb':
+        elif 'grb' in model_types:
 
             N_E = 30
             N_n = 30
@@ -608,7 +603,7 @@ class sedmachine(object):
 
                     model_list.append(data)
 
-        elif 'grb_angle' in model_type:
+        elif 'grb_angle' in model_types:
 
             N_theta = 30
 
@@ -719,6 +714,43 @@ class sedmachine(object):
 
         return(all_models)
 
+    def load_model(self, model):
+        typ=model['type']
+        if typ=='Kasen':
+            self.load_kasen_model(model['model'])
+        elif typ=='grb':
+            self.load_grb(parameters=model)
+        elif typ=='Kasen_double':
+            self.load_double_kasen_model(model['model1'], model['model2'])
+        else:
+            raise Exception(f'ERROR: unrecognized model type {typ}')
+
+    def get_model_name(self, model):
+        if model['type']=='Kasen':
+            if 'name' in model.keys():
+                model_name = model['name']
+            else:
+                model_name = model['model'].replace('h5','')
+
+        elif model['type']=='grb':
+            E_fmt = '%7.4f' % model['E']
+            n_fmt = '%7.7f' % model['n']
+            theta_fmt = '%7.4f' % model['theta_obs']
+            if 'name' in model.keys():
+                model_name = model['name']
+            else:
+                model_name = '{type}_{theta_obs}_{E}_{n}'.format(
+                    type=model['type'], E=E_fmt.strip(),
+                    n=n_fmt.strip(), theta_obs=theta_fmt.strip())
+
+        elif model['type']=='Kasen_double':
+            if 'name' in model.keys():
+                model_name = model['name']
+            else:
+                model_name = 'combined_Kasen_model'
+
+        return(model_name)
+
 
 def main():
     # Make an object with distance
@@ -736,9 +768,9 @@ def main():
     kn.load_passbands(passbands=passbands,instruments=instruments)
 
     # Load models from model file - see example
-    params={'theta_obs': args.theta_obs}
+    params={'theta_obs': args.theta_obs * np.pi/180.0}
     all_models = []
-    all_models += kn.find_models(model_type=args.models, params=params)
+    all_models += kn.find_models(model_types=args.models, params=params)
     all_models += kn.load_model_file(args.model_file)
 
     nmodels = str(len(all_models)).zfill(4)
@@ -756,31 +788,8 @@ def main():
 
         print(f'Working on model {model_num}/{nmodels}: {param_str}')
 
-        if model['type']=='Kasen':
-            kn.load_kasen_model(model['model'])
-            if 'name' in model.keys():
-                model_name = model['name']
-            else:
-                model_name = model['model'].replace('h5','')
-
-        elif model['type']=='grb':
-            kn.load_grb(parameters=model)
-            E_fmt = '%7.4f' % model['E']
-            n_fmt = '%7.7f' % model['n']
-            theta_fmt = '%7.4f' % model['theta_obs']
-            if 'name' in model.keys():
-                model_name = model['name']
-            else:
-                model_name = '{type}_{theta_obs}_{E}_{n}'.format(
-                    type=model['type'], E=E_fmt.strip(),
-                    n=n_fmt.strip(), theta_obs=theta_fmt.strip())
-
-        elif model['type']=='Kasen_double':
-            kn.load_double_kasen_model(model['model1'], model['model2'])
-            if 'name' in model.keys():
-                model_name = model['name']
-            else:
-                model_name = 'combined_Kasen_model'
+        kn.load_model(model)
+        model_name = kn.get_model_name(model)
 
         meta = ['{key} = {value}'.format(key=key, value=model[key])
             for key in model.keys()]
@@ -837,7 +846,6 @@ def main():
             armin_file = os.path.join(armin_dir, 'armin_'+armin_file)
             newtable.write(armin_file, overwrite=True, 
                 format='ascii.commented_header', formats=formats)
-
 
 if __name__=='__main__':
     sys.exit(main())
