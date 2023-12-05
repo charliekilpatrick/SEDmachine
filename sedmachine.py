@@ -34,8 +34,12 @@ MPC_TO_CM = u.megaparsec.to(u.centimeter)
 C_CGS = astropy.constants.c.cgs.value
 DAY_TO_S = u.day.to(u.second)
 
+# Convert normalized pysynphot.blackbody to solar luminosity flux units
+BB_SCALE = 1.4125447e+59
+
 # Internal dependency
 from common import grb
+from common import villar_kilonova_model
 
 
 def is_number(x):
@@ -57,15 +61,22 @@ class sedmachine(object):
 
         self.distance = distance
 
+        # time parameters
+        self.start_time = 0.0
+        self.end_time = 1500.0
+        self.ntimes = 500
+        self.time_scale = 'log'
+
         # wave set
         n_wave = 80
         self.waves = np.array(500.0+0.5*n_wave*np.arange(int(80000/n_wave)))
+        S.locations.wavecat = self.waves
 
         # Bandpass
         self.bandpass = {}
         self.bandpass_names = []
 
-        self.grb_param = {}
+        self.model_params = {}
 
         # Photometry tables for different phases, object types, models, etc.
         self.phottables = {}
@@ -80,7 +91,7 @@ class sedmachine(object):
         # Generic options that might need to be changed
         self.options = {
             'magsystem': 'abmag',
-            'time':'log',
+            'time':self.time_scale,
             'dirs': {
                 'filter': 'data/filters',
                 'models': 'data/models',
@@ -90,7 +101,7 @@ class sedmachine(object):
         }
 
         # For loading GRB models
-        grb_model = self.options['dirs']['models']+'/gw170817.h5'
+        grb_model = os.path.join(self.options['dirs']['models'],'Table.h5')
         self.grb_generator = grb.FluxGeneratorClass(grb_model, True, 'tau')
 
         # Make dirs
@@ -120,7 +131,7 @@ class sedmachine(object):
                     'miri': ['f0560w','f0770w','f1000w'],
                 },
                 'swift': {
-                    'uvot': ['uvw2','uvm2','uvw1','B','V','W']
+                    'uvot': ['uvw2','uvm2','uvw1','U','B','V','W']
                 },
                 'spitzer': {
                     'irac': []
@@ -128,9 +139,10 @@ class sedmachine(object):
                 'sdss': ['u','g','r','i','z'],
                 'johnson': ['U','B','V','R','I'],
                 'kpno': ['J', 'H', 'K'],
-                'ps1': ['g','r','i','z','Y'],
+                'ps1': ['g','r','i','z','Y','w'],
                 'clear': ['Clear'],
-                'ukirt': ['J','H','K']
+                'ukirt': ['J','H','K'],
+                'atlas': ['c','o']
         }
 
     def add_options(self):
@@ -146,19 +158,248 @@ class sedmachine(object):
             help='Override default to output all filters with input value.')
         parser.add_argument('--theta-obs',default=0.0,type=float,
             help='Observation angle for GRB jet we are observing.')
+        parser.add_argument('--kappa',default=1.0,type=float,
+            help='Opacity for Villar kilonova model.')
         parser.add_argument('--instruments',default=None,type=str,
             help='Comma-separated list of instruments to generate bandpass.')
         parser.add_argument('--armin',default=False,action='store_true',
             help='Armin likes the output in this specific format.  '+\
             'Flag to have it output this way.')
+        # Time parameters
+        parser.add_argument('--start-time',default=0.001,type=float,
+            help='Start time for model light curves.')
+        parser.add_argument('--end-time',default=150.0,type=float,
+            help='End time for model light curves.')
+        parser.add_argument('--ntimes',default=400,type=int,
+            help='Number of times in time array for model light curves.')
+        parser.add_argument('--time-scale', default='linear',type=str,
+            help='Scale to use for time axis.')
 
         args = parser.parse_args()
 
         return(args)
 
+    def create_blackbody(self, lum, temp):
+        if np.isnan(temp): temp=0.0
+        if np.isnan(lum): lum=0.0
+
+        bb = S.BlackBody(temp)
+        bb.convert('fnu')
+
+        if temp==0.0:
+            scale = 0.0
+        else:
+            scale = BB_SCALE/temp**4 * lum
+
+        bb = scale * bb
+
+        return(bb)
+
+    def load_villar_2comp_model(self, parameters={}):
+        """
+        Generate analytic Villar et al. (2017) spectral models and transform
+        into L_nu and wavelength (cgs) for input distance, and save in arrays.
+        Uses a 2 component model.
+        """
+
+        # Generic, 0.05 Msun purple kilonova model with velocity = 0.15c
+        P = {
+            'mass1': 0.023,
+            'kappa1': 0.5,
+            'velocity1': 0.256,
+            'mass2': 0.050,
+            'kappa2': 3.65,
+            'velocity2': 0.149,
+        }
+
+        P.update(parameters)
+
+        self.model_params.update(P)
+
+        # Get temperatures and luminosities for given model parameters
+        kappa = P['kappa1']
+        mass = P['mass1']
+        velo = P['velocity1']
+        if 'tfloor1' in P.keys():
+            tfloor1 = P['tfloor1']
+        else:
+            tfloor1 = None
+
+        luminosity1 = villar_kilonova_model.rprocess_luminosity(self.times, 
+            mass, velo, kappa)
+        temperature1 = villar_kilonova_model.temperature(self.times,
+            mass, velo, kappa, tfloor=tfloor1)
+
+        kappa = P['kappa2']
+        mass = P['mass2']
+        velo = P['velocity2']
+        if 'tfloor2' in P.keys():
+            tfloor2 = P['tfloor2']
+        else:
+            tfloor2 = None
+
+        luminosity2 = villar_kilonova_model.rprocess_luminosity(self.times, 
+            mass, velo, kappa)
+        temperature2 = villar_kilonova_model.temperature(self.times,
+            mass, velo, kappa, tfloor=tfloor2)
+
+        # Now create spectral luminosity using blackbodies
+        self.nu      = None
+        self.Lnu_all = None
+
+        for i in np.arange(len(self.times)):
+            lum1 = luminosity1[i]/(3.839e33)
+            temp1 = temperature1[i]
+
+            lum2 = luminosity2[i]/(3.839e33)
+            temp2 = temperature2[i]
+
+            bb1 = self.create_blackbody(lum1, temp1)
+            bb2 = self.create_blackbody(lum2, temp2)
+
+            if self.nu is None:
+                self.nu      = C_CGS / (bb1.wave * A_TO_CM)
+            if self.Lnu_all is None:
+                self.Lnu_all = np.zeros((len(self.times), len(self.nu)))
+
+            self.Lnu_all[i,:] = bb1.flux + bb2.flux
+
+    def load_villar_3comp_model(self, parameters={}):
+        """
+        Generate analytic Villar et al. (2017) spectral models and transform
+        into L_nu and wavelength (cgs) for input distance, and save in arrays.
+        Uses a 2 component model.
+        """
+
+        # Generic, 0.05 Msun purple kilonova model with velocity = 0.15c
+        P = {
+            'mass1': 0.020,
+            'kappa1': 0.5,
+            'velocity1': 0.266,
+            'mass2': 0.047,
+            'kappa2': 3.0,
+            'velocity2': 0.152,
+            'mass3': 0.011,
+            'kappa3': 10.0,
+            'velocity3': 0.137,
+        }
+
+        P.update(parameters)
+
+        self.model_params.update(P)
+
+        # Get temperatures and luminosities for given model parameters
+        kappa = P['kappa1']
+        mass = P['mass1']
+        velo = P['velocity1']
+        if 'tfloor1' in P.keys():
+            tfloor1 = P['tfloor1']
+        else:
+            tfloor1 = None
+
+        luminosity1 = villar_kilonova_model.rprocess_luminosity(self.times, 
+            mass, velo, kappa)
+        temperature1 = villar_kilonova_model.temperature(self.times,
+            mass, velo, kappa, tfloor=tfloor1)
+
+        kappa = P['kappa2']
+        mass = P['mass2']
+        velo = P['velocity2']
+        if 'tfloor2' in P.keys():
+            tfloor2 = P['tfloor2']
+        else:
+            tfloor2 = None
+
+        luminosity2 = villar_kilonova_model.rprocess_luminosity(self.times, 
+            mass, velo, kappa)
+        temperature2 = villar_kilonova_model.temperature(self.times,
+            mass, velo, kappa, tfloor=tfloor2)
+
+        kappa = P['kappa3']
+        mass = P['mass3']
+        velo = P['velocity3']
+        if 'tfloor3' in P.keys():
+            tfloor3 = P['tfloor3']
+        else:
+            tfloor3 = None
+
+        luminosity3 = villar_kilonova_model.rprocess_luminosity(self.times, 
+            mass, velo, kappa)
+        temperature3 = villar_kilonova_model.temperature(self.times,
+            mass, velo, kappa, tfloor=tfloor3)
+
+        # Now create spectral luminosity using blackbodies
+        self.nu      = None
+        self.Lnu_all = None
+
+        for i in np.arange(len(self.times)):
+            lum1 = luminosity1[i]/(3.839e33)
+            temp1 = temperature1[i]
+
+            lum2 = luminosity2[i]/(3.839e33)
+            temp2 = temperature2[i]
+
+            lum3 = luminosity3[i]/(3.839e33)
+            temp3 = temperature3[i]
+
+            bb1 = self.create_blackbody(lum1, temp1)
+            bb2 = self.create_blackbody(lum2, temp2)
+            bb3 = self.create_blackbody(lum3, temp3)
+
+            if self.nu is None:
+                self.nu      = C_CGS / (bb1.wave * A_TO_CM)
+            if self.Lnu_all is None:
+                self.Lnu_all = np.zeros((len(self.times), len(self.nu)))
+
+            self.Lnu_all[i,:] = bb1.flux + bb2.flux + bb3.flux
+
+    def load_villar_model(self, parameters={}):
+        """
+        Generate analytic Villar et al. (2017) spectral models and transform
+        into L_nu and wavelength (cgs) for input distance, and save in arrays
+        """
+
+        # Generic, 0.05 Msun purple kilonova model with velocity = 0.15c
+        P = {
+            'mass': 0.05,
+            'velocity': 0.15,
+            'kappa': 3.0,
+        }
+
+        P.update(parameters)
+
+        self.model_params.update(P)
+
+        # Get temperatures and luminosities for given model parameters
+        kappa = P['kappa']
+        mass = P['mass']
+        velo = P['velocity']
+
+        luminosity = villar_kilonova_model.rprocess_luminosity(self.times, 
+            mass, velo, kappa)
+        temperature = villar_kilonova_model.temperature(self.times,
+            mass, velo, kappa)
+
+        # Now create spectral luminosity using blackbodies
+        self.nu      = None
+        self.Lnu_all = None
+
+        for i in np.arange(len(self.times)):
+            lum = luminosity[i]/(3.839e33)
+            temp = temperature[i]
+
+            bb = self.create_blackbody(lum, temp)
+
+            if self.nu is None:
+                self.nu      = C_CGS / (bb.wave * A_TO_CM)
+            if self.Lnu_all is None:
+                self.Lnu_all = np.zeros((len(self.times), len(self.nu)))
+
+            self.Lnu_all[i,:] = bb.flux
+
     def load_kasen_model(self, model):
         """
-        Read in Kasen et al. 2017 spectral models, transform to wavelength
+        Read in Kasen et al. (2017) spectral models, transform to wavelength
         in angstrom and flam (cgs) for input distance, and save in arrays
         """
 
@@ -221,6 +462,20 @@ class sedmachine(object):
 
                 self.Lnu_all[i, j] += Lnu2_all[idx1, idx2]
 
+    def create_time_array(self):
+
+        # Generate a spectrum for the default waveset and input phase
+        Ntimes = self.ntimes
+        MAX_TIME = self.end_time
+        MIN_TIME = self.start_time
+
+        if self.options['time']=='linear':
+            self.times = (MAX_TIME - MIN_TIME)/Ntimes * np.arange(0, Ntimes+1)+\
+                MIN_TIME
+        elif self.options['time']=='log':
+            self.times   = 10**((np.log10(MAX_TIME)-np.log10(MIN_TIME))/Ntimes*\
+                np.arange(0, Ntimes + 1) + np.log10(MIN_TIME))
+
     def load_sed(self, model, phase=0, waveunit=u.angstrom, fluxunit=u.cgs):
         """
         Load a single epoch of a SED.  Default phase is 0 (this can be ignored
@@ -247,37 +502,31 @@ class sedmachine(object):
             self.flux.append(flux)
 
     def load_grb(self, parameters={}):
-        # Default parameters/GW170817
-        dL = 0.012188
+        # Default parameters
+        # See Fig. 13 in https://arxiv.org/pdf/2104.02070.pdf
         P = {
-            'E': 0.15869069395227384,
-            'Eta0': 7.973477192135503,
-            'GammaB': 11.000923300022666,
+            'E': 10**0.40,
+            'Eta0': 8.02,
+            'GammaB': 12.0,
             'dL': 0.012188,
-            'epsb': 0.013323706571267526,
-            'epse': 0.04072783842837688,
-            'n': 0.0009871221028954489,
-            'p': 2.1333493591554804,
-            'theta_obs':0.0,
+            'epsb': 10**-5.17,
+            'epse': 0.1,
+            'n': 1.0e-2,
+            'p': 2.15,
+            'theta_obs':0.44,
             'xiN': 1.0,
-            'z': 0.00973
+            'z': 0.0,
         }
+
         # Update parameters if there are any provided
         P.update(parameters)
 
-        self.grb_param=P
+        if 'E_kiso' in P.keys() and 'GammaB' in P.keys():
+            theta0 = 1./P['GammaB']
+            E = 0.5 * P['E_kiso'] * (1 - np.cos(theta0/2))
+            P['E'] = E
 
-        # Generate a spectrum for the default waveset and input phase
-        Ntimes = 500
-        MAX_TIME = 1500.0
-        MIN_TIME = 0.01
-
-        if self.options['time']=='linear':
-            self.times = (MAX_TIME - MIN_TIME)/Ntimes * np.arange(0, Ntimes+1)+\
-                MIN_TIME
-        elif self.options['time']=='log':
-            self.times   = 10**((np.log10(MAX_TIME)-np.log10(MIN_TIME))/Ntimes*\
-                np.arange(0, Ntimes + 1) + np.log10(MIN_TIME))
+        self.model_params.update(P)
 
         self.nu      = C_CGS / (self.waves * A_TO_CM)
         self.Lnu_all = np.zeros((len(self.times), len(self.nu)))
@@ -286,12 +535,15 @@ class sedmachine(object):
         all_nu = np.array(list(self.nu) * len(self.times), dtype=np.longdouble)
         all_times = np.array(sum([[t * DAY_TO_S] * len(self.nu)
             for t in self.times], []), dtype=np.longdouble)
+        # Output fluxes are in units of mJy
         all_flux = self.grb_generator.GetSpectral(all_times, all_nu, P)
 
         all_flux = np.array(all_flux)
 
+        # Mask out bad flux values
         all_flux[np.isnan(all_flux)] = 0.0
-        all_flux = all_flux * 1.0e-26 * 4 * np.pi * (dL * 1.0e28)**2
+        # Converting mJy to erg/s/Hz given input distance dL in 1.0e-28 cm units
+        all_flux = all_flux * 1.0e-26 * 4 * np.pi * (P['dL'] * 1.0e28)**2
 
         # Reshape the flux array into a 2D array for time and nu
         self.Lnu_all = np.reshape(all_flux, (len(self.times), len(self.nu)))
@@ -487,6 +739,23 @@ class sedmachine(object):
             self.bandpass[add_name] = bpmodel
             self.bandpass_names.append(add_name)
         print(message.format(source='PS1'))
+        for bp in filters['atlas']:
+            name = 'ATLAS,'+bp
+            if passbands:
+                if name not in passbands.keys():
+                    continue
+            if instruments:
+                if 'ps1' not in instruments:
+                    continue
+            file = os.path.join(self.options['dirs']['filter'],
+                f'ATLAS.{bp}.dat')
+            wave,transmission = np.loadtxt(file, unpack=True)
+            add_name = name.replace(',','_')
+            bpmodel = S.ArrayBandpass(wave, transmission,
+                name=add_name, waveunits='Angstrom')
+            self.bandpass[add_name] = bpmodel
+            self.bandpass_names.append(add_name)
+        print(message.format(source='ATLAS'))
         for bp in filters['ukirt']:
             name = 'ukirt,'+bp
             if passbands:
@@ -580,25 +849,101 @@ class sedmachine(object):
 
         elif 'grb' in model_types:
 
-            N_E = 30
-            N_n = 30
+            N_E = 35
+            N_n = 35
 
             # In units of log10(E/1e50 erg)
-            MAX_E = 2.0
+            MAX_E = 3.0
             MIN_E = -2.0
 
             # In units of log10(n * cm3)
-            MAX_n = 0.0
+            MAX_n = 1.0
             MIN_n = -6.0
 
             for i in np.arange(0, N_E+1):
                 for j in np.arange(0, N_n+1):
 
-                    data = {}
+                    data = {
+                        'E': 0.1*0.00043396498*10**0.40,
+                        'Eta0': 8.02,
+                        'GammaB': 12.0,
+                        'dL': 0.012188,
+                        'epsb': 10**-5.17,
+                        'epse': 0.1,
+                        'n': 1.0e-2,
+                        'p': 2.15,
+                        'theta_obs':0.44,
+                        'xiN': 1.0,
+                        'z': 0.0,
+                    }
+
                     data['type'] = 'grb'
-                    data['E'] = 10**(MIN_E + (MAX_E - MIN_E) * float(i)/N_E)
+                    data['E_kiso'] = 10**(MIN_E + (MAX_E - MIN_E) * float(i)/N_E)
                     data['n'] = 10**(MIN_n + (MAX_n - MIN_n) * float(j)/N_n)
                     data['theta_obs'] = 0.0
+                    data.update(params)
+
+                    model_list.append(data)
+
+        elif 'villar_gw170817' in model_types:
+
+            model = {
+                'type': 'villar_2comp',
+                'mass1': 0.023,
+                'kappa1': 0.5,
+                'velocity1': 0.256,
+                'tfloor1': 3983,
+                'mass2': 0.050,
+                'kappa2': 3.65,
+                'velocity2': 0.149,
+                'tfloor2': 1151,
+            }
+
+            model_list.append(model)
+
+        elif 'villar_gw170817_3comp' in model_types:
+
+            model = {
+                'type': 'villar_3comp',
+                'mass1': 0.020,
+                'kappa1': 0.5,
+                'velocity1': 0.266,
+                'tfloor1': 674,
+                'mass2': 0.047,
+                'kappa2': 3.0,
+                'velocity2': 0.152,
+                'tfloor2': 1308,
+                'mass3': 0.011,
+                'kappa3': 10.0,
+                'velocity3': 0.137,
+                'tfloor3': 3745,
+            }
+
+            model_list.append(model)
+            
+        elif 'villar' in model_types:
+
+            N_M = 30
+            N_v = 30
+
+            # In units of log10(E/1e50 erg)
+            MAX_M = -3.0
+            MIN_M = -0.30102999566
+
+            # In units of log10(n * cm3)
+            MAX_v = 0.03
+            MIN_v = 0.50
+
+            for i in np.arange(0, N_M+1):
+                for j in np.arange(0, N_v+1):
+
+                    data = {
+                        'kappa': 1.0,
+                    }
+
+                    data['type'] = 'villar'
+                    data['mass'] = 10**(MIN_M + (MAX_M - MIN_M) * float(i)/N_M)
+                    data['velocity'] = MIN_v + (MAX_v - MIN_v) * float(j)/N_v
                     data.update(params)
 
                     model_list.append(data)
@@ -631,9 +976,8 @@ class sedmachine(object):
         """
         Get the flam spectrum for some specific phase
         """
-        it  = bisect.bisect(self.times, phase)
-        it -= 1 # Kasen array indexing is off by 1
-        Lnu = self.Lnu_all[it,:]
+        idx = np.argmin(np.abs(self.times-phase))
+        Lnu = self.Lnu_all[idx,:]
 
         # We want things in Flambda (ergs/s/Angstrom)
         lam  = C_CGS / self.nu / A_TO_CM
@@ -716,7 +1060,13 @@ class sedmachine(object):
 
     def load_model(self, model):
         typ=model['type']
-        if typ=='Kasen':
+        if typ=='villar_2comp':
+            self.load_villar_2comp_model(parameters=model)
+        elif typ=='villar_3comp':
+            self.load_villar_3comp_model(parameters=model)
+        elif typ=='villar':
+            self.load_villar_model(parameters=model)
+        elif typ=='Kasen':
             self.load_kasen_model(model['model'])
         elif typ=='grb':
             self.load_grb(parameters=model)
@@ -733,7 +1083,7 @@ class sedmachine(object):
                 model_name = model['model'].replace('h5','')
 
         elif model['type']=='grb':
-            E_fmt = '%7.4f' % model['E']
+            E_fmt = '%7.4f' % model['E_kiso']
             n_fmt = '%7.7f' % model['n']
             theta_fmt = '%7.4f' % model['theta_obs']
             if 'name' in model.keys():
@@ -742,6 +1092,65 @@ class sedmachine(object):
                 model_name = '{type}_{theta_obs}_{E}_{n}'.format(
                     type=model['type'], E=E_fmt.strip(),
                     n=n_fmt.strip(), theta_obs=theta_fmt.strip())
+
+        elif model['type']=='villar':
+            M_fmt = '%.4f'%model['mass']
+            v_fmt = '%.4f'%model['velocity']
+            kappa_fmt = '%.4f'%model['kappa']
+
+            if 'name' in model.keys():
+                model_name = model['name']
+            else:
+                model_name = '{type}_{mass}_{velocity}_{kappa}'.format(
+                    type=model['type'], mass=M_fmt.strip(),
+                    velocity=v_fmt.strip(), kappa=kappa_fmt.strip())
+
+        elif model['type']=='villar_2comp':
+            M1_fmt = '%.4f'%model['mass1']
+            v1_fmt = '%.4f'%model['velocity1']
+            kappa1_fmt = '%.4f'%model['kappa1']
+
+            M2_fmt = '%.4f'%model['mass2']
+            v2_fmt = '%.4f'%model['velocity2']
+            kappa2_fmt = '%.4f'%model['kappa2']
+
+            if 'name' in model.keys():
+                model_name = model['name']
+            else:
+                model_name = '{type}_{mass1}_{velocity1}_{kappa1}_'+\
+                    '{mass2}_{velocity2}_{kappa2}'
+                model_name = model_name.format(
+                    type=model['type'], mass1=M1_fmt.strip(),
+                    velocity1=v1_fmt.strip(), kappa1=kappa1_fmt.strip(), 
+                    mass2=M2_fmt.strip(),
+                    velocity2=v2_fmt.strip(), kappa2=kappa2_fmt.strip())
+
+        elif model['type']=='villar_3comp':
+            M1_fmt = '%.4f'%model['mass1']
+            v1_fmt = '%.4f'%model['velocity1']
+            kappa1_fmt = '%.4f'%model['kappa1']
+
+            M2_fmt = '%.4f'%model['mass2']
+            v2_fmt = '%.4f'%model['velocity2']
+            kappa2_fmt = '%.4f'%model['kappa2']
+
+            M3_fmt = '%.4f'%model['mass3']
+            v3_fmt = '%.4f'%model['velocity3']
+            kappa3_fmt = '%.4f'%model['kappa3']
+
+            if 'name' in model.keys():
+                model_name = model['name']
+            else:
+                model_name = '{type}_{mass1}_{velocity1}_{kappa1}_'+\
+                    '{mass2}_{velocity2}_{kappa2}'+\
+                    '{mass3}_{velocity3}_{kappa3}'
+                model_name = model_name.format(
+                    type=model['type'], mass1=M1_fmt.strip(),
+                    velocity1=v1_fmt.strip(), kappa1=kappa1_fmt.strip(), 
+                    mass2=M2_fmt.strip(),
+                    velocity2=v2_fmt.strip(), kappa2=kappa2_fmt.strip(),
+                    mass3=M3_fmt.strip(),
+                    velocity3=v3_fmt.strip(), kappa3=kappa3_fmt.strip())
 
         elif model['type']=='Kasen_double':
             if 'name' in model.keys():
@@ -759,6 +1168,14 @@ def main():
     # load models
     args = kn.add_options()
 
+    # Time parameters
+    kn.start_time = args.start_time
+    kn.end_time = args.end_time
+    kn.ntimes = args.ntimes
+    kn.time_scale = args.time_scale
+
+    kn.create_time_array()
+
     # Load filters
     passbands = args.filters
     if args.instruments:
@@ -768,7 +1185,7 @@ def main():
     kn.load_passbands(passbands=passbands,instruments=instruments)
 
     # Load models from model file - see example
-    params={'theta_obs': args.theta_obs * np.pi/180.0}
+    params={'theta_obs': args.theta_obs * np.pi/180.0, 'kappa': args.kappa}
     all_models = []
     all_models += kn.find_models(model_types=args.models, params=params)
     all_models += kn.load_model_file(args.model_file)
@@ -776,23 +1193,27 @@ def main():
     nmodels = str(len(all_models)).zfill(4)
     for num, model in enumerate(all_models):
 
+        kn.model_params.update(model)
+
         param_str = ''
-        for key in model.keys():
-            if is_number(model[key]):
-                val = '%.4e'%float(model[key])
+        for key in sorted(list(kn.model_params.keys())):
+            if model['type']=='grb' and key not in ['E_kiso','theta_obs','n']:
+                continue
+            if is_number(kn.model_params[key]):
+                val = '%.4e'%float(kn.model_params[key])
             else:
-                val = str(model[key])
+                val = str(kn.model_params[key])
             param_str += str(key)+'='+val+' '
 
         model_num = str(int(num)+1).zfill(4)
 
         print(f'Working on model {model_num}/{nmodels}: {param_str}')
 
-        kn.load_model(model)
-        model_name = kn.get_model_name(model)
+        kn.load_model(kn.model_params)
+        model_name = kn.get_model_name(kn.model_params)
 
-        meta = ['{key} = {value}'.format(key=key, value=model[key])
-            for key in model.keys()]
+        meta = ['{key} = {value}'.format(key=key, value=kn.model_params[key])
+            for key in kn.model_params.keys()]
 
         # Each model will have a phottable organized as phase (rows) vs.
         # mag in passband (cols).   Here we'll initialize the phottable as
@@ -803,7 +1224,7 @@ def main():
         # Iterate over times in the model
         for i, phase in enumerate(kn.times):
             # Calculate the observer frame phase
-            time = float('%.4f'%phase)
+            time = float('%.6f'%phase)
 
             # Generate an empty row of photometry starting with current time
             row = [time] + [0.] * len(kn.bandpass_names)
@@ -821,13 +1242,13 @@ def main():
                 kn.phottables[model_name][bp][row_num] = mag
 
         # Now output phottable
-        outfile_name = os.path.join(kn.options['dirs']['tables'], model['type'],
-            model_name + '.dat')
+        outfile_name = os.path.join(kn.options['dirs']['tables'], 
+            kn.model_params['type'], model_name + '.dat')
 
         if not os.path.exists(os.path.dirname(outfile_name)):
             os.makedirs(os.path.dirname(outfile_name))
 
-        formats = {'time': '{:<12}'}
+        formats = {'time': '{:<16}'}
         for bp in kn.bandpass_names:
             formats[bp] = '{:<24}'
 

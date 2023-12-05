@@ -8,21 +8,21 @@ import h5py as h5
 
 class InterpolatorClass:
     '''
-    InterpolatorClass performs interpolation in the boosted fireball Table.
+    InterpolatorClass performs interpolation in the boosted fireball Table. 
     '''
     ### Private: h5 Table
     _Table = {}
     _Axis = {}
-
+    
     ### Private: interpolation function
     _f_peak = None
     _f_nu_c = None
     _f_nu_m = None
-
+    
     def __init__(self, Table, LogTable=True, LogAxis=['tau']):
         '''
         Initialize InterpolatorClass.
-
+        
         Args:
             Table (str): directory to boosted fireball table
             LogTable (bool): whether Table is measured in log scale
@@ -31,7 +31,7 @@ class InterpolatorClass:
         self._LoadTable(Table)
         self._SetScale(LogTable=True,LogAxis=['tau'])
         self._GetInterpolator()
-
+    
     ### Private Function
     def _LoadTable(self, Table):
         '''
@@ -47,11 +47,11 @@ class InterpolatorClass:
             else:
                 self._Axis[key] = Data[key][...]
 
-        ### Due to some reasons, we need to convert bytes to string.
+        ### Due to some reasons, we need to convert bytes to string. 
         self._Axis['Axis'] = np.array([x.decode("utf-8") for x in self._Axis['Axis']])
         Data.close()
-
-
+    
+    
     def _SetScale(self, LogTable=True,LogAxis=['tau']):
         '''
         Set proper scales to table and axis.
@@ -76,8 +76,8 @@ class InterpolatorClass:
                 temp = np.ma.log(self._Table[key])
                 self._Table[key] = temp.filled(-np.inf)
             self._Table['LogTable'] = True
-
-
+    
+    
     def _GetInterpolator(self):
         '''
         Use scipy.interpolate.RegularGridInterpolator to perform interpolation.
@@ -91,21 +91,21 @@ class InterpolatorClass:
             bounds_error=False, fill_value=None)
         self._f_nu_m = RegularGridInterpolator(Axes, self._Table['f_nu_m'],
             bounds_error=False, fill_value=None)
-
+    
     ### Public Function
     def GetTableInfo(self):
         '''
-        Get Table Information.
+        Get Table Information. 
 
         Return:
             dict
         '''
         return self.Info
-
-
+    
+    
     def GetValue(self, Position):
         '''
-        Get the characteristic function values at the Position.
+        Get the characteristic function values at the Position. 
 
         Args:
             Position (Array): (tau, Eta0, GammaB, theta_obs) (linear scale)
@@ -121,7 +121,7 @@ class InterpolatorClass:
             idx = np.where(self._Axis['Axis'] == key)[0][0]
             ScaledPosition[:,idx] = np.log(ScaledPosition[:,idx])
 
-        ### When lorentz factor is low and observation time is ealry, there is no detection, which is represented by nans.
+        ### When lorentz factor is low and observation time is ealry, there is no detection, which is represented by nans. 
         try:
             if self._Table['LogTable']:
                 f_peak = np.exp(self._f_peak(ScaledPosition))
@@ -138,7 +138,7 @@ class InterpolatorClass:
             Nans = [np.nan for x in range(len(Position))]
             f_peak, f_nu_c, f_nu_m = Nans, Nans, Nans
             return f_peak, f_nu_c, f_nu_m
-
-
-
-
+    
+    
+    
+    
