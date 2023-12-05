@@ -36,6 +36,7 @@ DAY_TO_S = u.day.to(u.second)
 
 # Convert normalized pysynphot.blackbody to solar luminosity flux units
 BB_SCALE = 1.4125447e+59
+L_SUN = 3.826e33
 
 # Internal dependency
 from common import grb
@@ -68,9 +69,9 @@ class sedmachine(object):
         self.time_scale = 'log'
 
         # wave set
-        n_wave = 80
-        self.waves = np.array(500.0+0.5*n_wave*np.arange(int(80000/n_wave)))
-        S.locations.wavecat = self.waves
+        S.setref(waveset=(10.0,30000.0,15000))
+        test = S.BlackBody(5000)
+        self.waves = test.wave
 
         # Bandpass
         self.bandpass = {}
@@ -184,14 +185,12 @@ class sedmachine(object):
         if np.isnan(lum): lum=0.0
 
         bb = S.BlackBody(temp)
+
+        # Normalize blackbody
+        bb.convert('flam')
+        scale = 1.0/scipy.integrate.simps(bb.flux, bb.wave)
+        bb = bb * scale * lum * L_SUN
         bb.convert('fnu')
-
-        if temp==0.0:
-            scale = 0.0
-        else:
-            scale = BB_SCALE/temp**4 * lum
-
-        bb = scale * bb
 
         return(bb)
 

@@ -34,7 +34,7 @@ for key in all_data.keys():
 # convert to app map
 mu = 5*np.log10(43.2 * 1e6)-5
 
-fig = plt.figure(figsize=(5, 10), dpi=600)
+fig = plt.figure(figsize=(10, 10), dpi=600)
 ax = fig.add_subplot(111)
 
 filt_map = {'K':'ukirt_K',
