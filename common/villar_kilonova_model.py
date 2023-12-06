@@ -24,13 +24,15 @@ def rprocess_efficiency(time, mass, velocity):
 
 def rprocess_luminosity(time, mass, velocity, kappa):
 
-    lscale = mass * 1.989e33 * 4.0e18 * 0.36
     tscale = (time * 86400.0 - 1.3)/0.11
 
     a, b, d = get_abd(mass, velocity)
 
-    lum1 = lscale * (0.5 - 1.0/np.pi * np.arctan(tscale))**1.3
-    lum2 = np.exp(-a * time) + np.log1p(2.0 * b * time**d)/(2.0 * b * time**d)
+    td = 6.6517 * np.sqrt(kappa * mass/velocity)
+
+    lum1 = mass * 1.989e33 * 4.0e18 * (0.5 - 1.0/np.pi * np.arctan(tscale))**1.3
+    lum2 = 0.36 * (np.exp(-a * time) + np.log1p(2.0 * b * time**d)/(2.0 * b * time**d))
+    #lum3 = np.exp(-time**2 / td**2) * time/td
 
     luminosity = lum1 * lum2
 
