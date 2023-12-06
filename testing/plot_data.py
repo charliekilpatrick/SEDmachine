@@ -34,8 +34,8 @@ for key in all_data.keys():
 # convert to app map
 mu = 5*np.log10(43.2 * 1e6)-5
 
-fig = plt.figure(figsize=(10, 10), dpi=600)
-ax = fig.add_subplot(111)
+fig, ax = plt.subplots(2,1,figsize=(12, 10), dpi=600,
+    gridspec_kw={'height_ratios': [3, 1]})
 
 filt_map = {'K':'ukirt_K',
             'H':'ukirt_H',
@@ -74,6 +74,8 @@ extinction = {
 'w': 0.28311726260000003,
 }
 
+
+all_residuals =[]
 for i,filt in enumerate(['K','H','J','y','z','i','r','V','g','B']):
 
     if filt not in all_data.keys():
@@ -92,13 +94,37 @@ for i,filt in enumerate(['K','H','J','y','z','i','r','V','g','B']):
     else:
         label=filt+'+'+str(offsets[i])
 
-    ax.errorbar(time, mag - mu + offsets[i] - extinction[filt], yerr=magerr, color=colors[i], fmt='*',
-        linestyle='None', label=label)
-    ax.plot(model_table['time'], model_table[model_filt] + offsets[i], color=colors[i],
+    ax[0].errorbar(time, mag - mu + offsets[i] - extinction[filt], yerr=magerr, color=colors[i], fmt='o',
+        linestyle='None', label=label, markeredgecolor='k', markeredgewidth=1)
+    ax[0].plot(model_table['time'], model_table[model_filt] + offsets[i], color=colors[i],
         linestyle='solid')
 
-plt.ylim([-8,-18])
-plt.xlim([0,22])
-plt.legend()
+    for j in np.arange(len(time)):
+        idx = np.argmin(np.abs(model_table['time']-time[j]))
+
+        residual = (mag[j] - mu - extinction[filt]) - model_table[model_filt][idx]
+        all_residuals.append(residual)
+
+        ax[1].plot(time[j], residual, color=colors[i], marker='o',
+            markeredgecolor='k', markeredgewidth=1)
+
+xlim=[0,20]
+ax[0].set_ylim([-8,-18])
+ax[0].set_xlim(xlim)
+ax[0].set_ylabel('Absolute Magnitude',fontsize=20)
+ax[1].set_xlabel('Rest-frame Days from Merger',fontsize=20)
+
+resid_ylim=[-2,2]
+yran=resid_ylim[1]-resid_ylim[0]
+ax[1].set_ylim(resid_ylim)
+ax[1].set_xlim(xlim)
+ax[1].hlines(0,0,20,linestyle='dashed',color='k')
+avg_resid=float('%.3f'%np.mean(all_residuals))
+ax[1].text(xlim[1]*0.8,resid_ylim[1]-0.1*yran,f'Average Residual={avg_resid} mag')
+ax[1].set_xlabel('Residual',fontsize=20)
+
+ax[0].legend()
+
+plt.tight_layout()
 
 plt.savefig('villar_models.png')
