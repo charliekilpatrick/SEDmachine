@@ -5,10 +5,59 @@ import numpy as np
 from matplotlib import rc
 from matplotlib.ticker import MultipleLocator,AutoMinorLocator
 import os
+import sys
+import pickle
+import json
+
+parent_dir = os.path.dirname(os.path.realpath(__file__))
+parent_dir = os.path.dirname(parent_dir)
+sys.path.append(parent_dir)
+print(parent_dir)
+
+import sedmachine
+from common import utilities
+from common import constants
+
+machine = sedmachine.sedmachine()
 
 figsize=10.0
 rc('font',**{'family':'serif','serif':['Times'], 'size':2.2*figsize})
 rc('text', usetex=True, color='k')
+
+blackbody_file = os.path.join(parent_dir, "data","models","blackbodies.pkl")
+if os.path.exists(blackbody_file):
+    with open(blackbody_file, 'rb') as f:
+        all_blackbodies = pickle.load(f)
+
+def compute_model_mag(bandpasses, times, parameters):
+
+    machine.times = times
+
+    lums=[]
+    temps=[]
+    for i in np.arange(3):
+        i=i+1
+        P={}
+        for param in ['mass','kappa','velocity','tfloor']:
+            P[param]=parameters[param+str(i)]
+
+        lum, temp = machine.generate_villar_model(parameters=P)
+
+        lums.append(lum)
+        temps.append(temp)
+
+    lums=np.array(lums)
+    temps=np.array(temps)
+
+    mags=[]
+    for j in np.arange(len(times)):
+        blackbody_fluxes = np.array([10**(-0.4*all_blackbodies[bandpasses[j]](temps[:,j]))])
+
+        mags.append(-2.5*np.log10(np.sum(lums[:,j]/(3.826e33) * blackbody_fluxes)))
+    
+    mags=np.array(mags)
+
+    return(mags)
 
 def load_data(data_file, filts=['K','H','J','y','z','i','r','V','g','B']):
 
@@ -46,16 +95,40 @@ def load_data(data_file, filts=['K','H','J','y','z','i','r','V','g','B']):
     return(all_data)
 
 
-data_file = "GW170817.json"
-model_table_file = os.path.join("..","output","tables","villar_3comp",
-    "villar_3comp_0.0200_0.2660_0.5000_0.0470_0.1520_3.00000.0110_0.1370_10.0000.dat")
+data_file = os.path.join(parent_dir,"data","lightcurves","GW170817","GW170817.json")
+model_table_file = os.path.join(parent_dir,"output","tables","villar_3comp",
+    "villar_gw170817_3comp_mcmc.dat")
 filts=['K','H','J','y','z','i','r','V','g','B']
+
+filt_map = {'K':'ukirt_K',
+            'H':'ukirt_H',
+            'J':'ukirt_J',
+            'y':'PS1_y',
+            'z':'sdss_z',
+            'i':'sdss_i',
+            'r':'sdss_r',
+            'V':'johnson_V',
+            'g':'sdss_g',
+            'B':'johnson_B'}
+
+with open(os.path.join(parent_dir,'data','models',
+    'villar_gw170817_3comp_mod.dat'),'r') as f:
+    model_params = json.load(f)
+
+new_models = {'time':np.logspace(-3.0, 3.0, 15000)}
+for filt in filts:
+
+    full_filt = filt_map[filt]
+    mags = compute_model_mag(np.array([full_filt]*len(new_models['time'])),
+        new_models['time'], model_params)
+
+    new_models[full_filt]=mags
 
 model_table = Table.read(model_table_file, format='ascii.ecsv')
 all_data = load_data(data_file, filts=filts)
 
 # convert to app map
-mu = 5*np.log10(43.2 * 1e6)-5
+mu = 5*np.log10(40.0 * 1e6)-5
 
 fig, ax = plt.subplots(2,1,figsize=(12, 10), dpi=600,
     gridspec_kw={'height_ratios': [3, 1]})
@@ -83,17 +156,6 @@ ax[1].tick_params(direction='in', length=figsize,
             width=0.3*figsize, which='minor', axis='both', colors='k',
             pad=0.2*figsize, top=True, bottom=True, left=True, right=True)
 
-filt_map = {'K':'ukirt_K',
-            'H':'ukirt_H',
-            'J':'ukirt_J',
-            'y':'PS1_Y',
-            'z':'PS1_z',
-            'i':'PS1_i',
-            'r':'PS1_r',
-            'V':'johnson_V',
-            'g':'PS1_g',
-            'B':'johnson_B'}
-
 
 cmap = plt.get_cmap('rainbow')
 colors = cmap(np.linspace(0,1,len(filts)))
@@ -120,8 +182,9 @@ extinction = {
 'w': 0.28311726260000003,
 }
 
-
+all_mags = []
 all_residuals =[]
+all_sigmas=[]
 for i,filt in enumerate(filts):
 
     if filt not in all_data.keys():
@@ -132,6 +195,11 @@ for i,filt in enumerate(filts):
     time = all_data[filt]['time']
     mag = all_data[filt]['mag']
     magerr = all_data[filt]['magerr']
+
+    #model_time = new_models['time']
+    #model_mags = new_models[model_filt]
+    model_time = model_table['time']
+    model_mags = model_table[model_filt]
 
     offsets[i]=float('%.2f'%offsets[i])
     if offsets[i]==0.0:
@@ -144,24 +212,34 @@ for i,filt in enumerate(filts):
     ax[0].errorbar(time, mag - mu + offsets[i] - extinction[filt], yerr=magerr, 
         color=colors[len(filts)-1-i], fmt='o', linestyle='None', label=label, 
         markeredgecolor='k', markeredgewidth=1, markersize=1.0*figsize)
-    ax[0].plot(model_table['time'], model_table[model_filt] + offsets[i], 
-        color=colors[len(filts)-1-i],linestyle='solid')
+    
+    ax[0].plot(model_time, model_mags+offsets[i],
+        color=colors[len(filts)-1-i], linestyle='solid')
 
     for j in np.arange(len(time)):
-        idx = np.argmin(np.abs(model_table['time']-time[j]))
 
-        residual = (mag[j] - mu - extinction[filt]) - model_table[model_filt][idx]
+        idx = np.argmin(np.abs(model_time-time[j]))
+        residual = (mag[j]-mu-extinction[filt])-model_mags[idx]
+        all_mags.append(mag[j] - mu + offsets[i] - extinction[filt] - magerr[j])
+        all_mags.append(mag[j] - mu + offsets[i] - extinction[filt] + magerr[j])
         all_residuals.append(residual)
+        all_sigmas.append(magerr[j])
 
-        ax[1].plot(time[j], residual, color=colors[len(filts)-1-i], marker='o',
+        ax[1].errorbar(time[j], residual, yerr=magerr[j], 
+            color=colors[len(filts)-1-i], marker='o',
             markeredgecolor='k', markeredgewidth=1, markersize=1.0*figsize)
 
-xlim=[0,20]
+xlim=[0.4,20]
 resid_ylim=[-2,2]
 yran=resid_ylim[1]-resid_ylim[0]
 
-ax[0].set_ylim([-8,-18])
+mag_range = np.max(all_mags)-np.min(all_mags)
+
+ax[0].set_ylim([np.max(all_mags)+0.05*mag_range,np.min(all_mags)-0.05*mag_range])
 ax[0].set_xlim(xlim)
+ax[1].set_xlim(xlim)
+#ax[0].set_xscale('log')
+#ax[1].set_xscale('log')
 ax[0].set_ylabel('Absolute Magnitude [AB mag]',fontsize=2.0*figsize)
 ax[1].set_xlabel('Rest-frame Days from Merger',fontsize=2.0*figsize)
 
@@ -170,8 +248,12 @@ ax[1].set_xlim(xlim)
 ax[1].hlines(0,*xlim,linestyle='dashed',color='k')
 # Get RMS from residuals
 rms = np.sqrt(np.mean(np.array(all_residuals)**2))
+chi2 = 1/len(all_residuals) * np.sum(np.array(all_residuals)**2 / np.array(all_sigmas)**2)
+
 rms = float('%.3f'%rms)
-ax[1].text(xlim[1]*0.75,resid_ylim[0]+0.2*yran,f'RMS scatter={rms} mag',
+chi2 = float('%.3f'%chi2)
+
+ax[1].text(xlim[0]+0.07,resid_ylim[0]+0.68*yran,r'$\chi^{2}$='+str(chi2)+'\nRMS scatter='+str(rms)+' mag',
     fontsize=1.6*figsize)
 ax[1].set_ylabel('Residual [mag]',fontsize=2.0*figsize)
 
@@ -179,4 +261,4 @@ ax[0].legend(fontsize=1.5*figsize,ncols=2)
 
 plt.tight_layout()
 
-plt.savefig('villar_models.png')
+plt.savefig(os.path.join(parent_dir, 'plots', 'rprocess_model.png'))

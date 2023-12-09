@@ -14,6 +14,7 @@ import scipy
 import glob
 import re
 import copy
+import json
 import numpy as np
 import astropy.constants
 import astropy.units as u
@@ -40,7 +41,7 @@ L_SUN = 3.826e33
 
 # Internal dependency
 from common import grb
-from common import villar_kilonova_model
+from common import rprocess
 
 
 def is_number(x):
@@ -63,13 +64,13 @@ class sedmachine(object):
         self.distance = distance
 
         # time parameters
-        self.start_time = 0.0
-        self.end_time = 1500.0
-        self.ntimes = 500
+        self.start_time = 0.001
+        self.end_time = 1000.0
+        self.ntimes = 15000
         self.time_scale = 'log'
 
         # wave set
-        S.setref(waveset=(10.0,30000.0,15000))
+        S.setref(waveset=(10.0,1000000.0,15000))
         test = S.BlackBody(5000)
         self.waves = test.wave
 
@@ -89,15 +90,20 @@ class sedmachine(object):
                 'pandeia path if you want to use JWST filters.')
             self.pandeia = None
 
+        if 'PYSYN_CDBS' not in os.environ.keys():
+            raise Exception(f'ERROR: install pysynphot CDBS'+\
+                'see: https://pysynphot.readthedocs.io/en/latest/index.html')
+
         # Generic options that might need to be changed
+        parent_dir = os.path.dirname(os.path.realpath(__file__))
         self.options = {
             'magsystem': 'abmag',
             'time':self.time_scale,
             'dirs': {
-                'filter': 'data/filters',
-                'models': 'data/models',
-                'figures': 'output/figures',
-                'tables': 'output/tables',
+                'filter': os.path.join(parent_dir, 'data/filters'),
+                'models': os.path.join(parent_dir, 'data/models'),
+                'figures': os.path.join(parent_dir, 'output/figures'),
+                'tables': os.path.join(parent_dir, 'output/tables'),
             }
         }
 
@@ -131,12 +137,8 @@ class sedmachine(object):
                         'f277w','f322w2','f356w','f444w'],
                     'miri': ['f0560w','f0770w','f1000w'],
                 },
-                'swift': {
-                    'uvot': ['uvw2','uvm2','uvw1','U','B','V','W']
-                },
-                'spitzer': {
-                    'irac': []
-                },
+                'swift': ['w2','m2','w1','U','B','V','W'],
+                'spitzer': ['ch1','ch2','ch3','ch4'],
                 'sdss': ['u','g','r','i','z'],
                 'johnson': ['U','B','V','R','I'],
                 'kpno': ['J', 'H', 'K'],
@@ -161,6 +163,10 @@ class sedmachine(object):
             help='Observation angle for GRB jet we are observing.')
         parser.add_argument('--kappa',default=1.0,type=float,
             help='Opacity for Villar kilonova model.')
+        parser.add_argument('--tfloor',default=None,type=float,
+            help='Use this value as temperature floor (T_c) for Villar model.')
+        parser.add_argument('--clobber',default=False,action='store_true',
+            help='Clobber previous versions of model files.')
         parser.add_argument('--instruments',default=None,type=str,
             help='Comma-separated list of instruments to generate bandpass.')
         parser.add_argument('--armin',default=False,action='store_true',
@@ -169,7 +175,7 @@ class sedmachine(object):
         # Time parameters
         parser.add_argument('--start-time',default=0.001,type=float,
             help='Start time for model light curves.')
-        parser.add_argument('--end-time',default=150.0,type=float,
+        parser.add_argument('--end-time',default=100.0,type=float,
             help='End time for model light curves.')
         parser.add_argument('--ntimes',default=400,type=int,
             help='Number of times in time array for model light curves.')
@@ -179,6 +185,89 @@ class sedmachine(object):
         args = parser.parse_args()
 
         return(args)
+
+    def get_ab_to_vega(self, bandpass):
+
+        flat = np.zeros(len(self.waves))+1.0
+        test = S.ArraySpectrum(self.waves, flat)
+        kwargs = {'force': 'taper', 'binset': self.waves}
+        obs = S.Observation(test, bandpass, **kwargs)
+
+        # AB to Vega conversion is Mag_Vega - Mag_AB
+        ab_to_vega = obs.effstim('vegamag')-obs.effstim('abmag')
+
+        return(ab_to_vega)
+
+    # Calculates extinction in input bandpass given Av and Rv
+    def calculate_extinction(self, Av, Rv, bandpass):
+
+        test = self.extinction_law(self.waves, Av, Rv)
+        flat = np.zeros(len(self.waves))+1.0
+
+        test1 = S.ArraySpectrum(self.waves, flat)
+        test2 = S.ArraySpectrum(self.waves, flat*test.flux)
+
+        kwargs = {'force': 'taper', 'binset': self.waves}
+
+        obs1 = S.Observation(test1, bandpass, **kwargs)
+        obs2 = S.Observation(test2, bandpass, **kwargs)
+
+        # This is extinction in bandpass
+        a_lambda = obs2.effstim('abmag')-obs1.effstim('abmag')
+
+        return(a_lambda)
+
+    def extinction_law(self, wave, Av, Rv, deredden=False):
+
+        # Inverse wavelength dependent quantities
+        x=1./(wave*1.0e-4)
+        y=x-1.82
+
+        # Variables proportional to extinction
+        a=np.zeros(len(wave))
+        b=np.zeros(len(wave))
+        Fa=np.zeros(len(wave))
+        Fb=np.zeros(len(wave))
+
+        # Masks to apply piecewise Cardelli et al. function
+        mask1 = np.where(x < 1.1)
+        mask2 = np.where((x > 1.1) & (x < 3.3))
+        mask3 = np.where(x > 3.3)
+        mask4 = np.where(x > 5.9)
+
+        x=1./(wave[mask1]*1.0e-4)
+        y=x-1.82
+
+        a[mask1]=0.574 * x**1.61
+        b[mask1]=-0.527 * x**1.61
+
+        x=1./(wave[mask2]*1.0e-4)
+        y=x-1.82
+
+        a[mask2]=1 + 0.17699 * y - 0.50447 * y**2 - 0.02427 * y**3 +\
+            0.72085 * y**4 + 0.01979*y**5 - 0.77530*y**6 + 0.32999*y**7
+        b[mask2]=1.41338 * y + 2.28305 * y**2 + 1.07233 * y**3 -\
+            5.38434 * y**4 - 0.62251 * y**5 + 5.30260 * y**6 - 2.09002 * y**7
+
+        x=1./(wave[mask4]*1.0e-4)
+        y=x-1.82
+
+        Fa[mask4]=-0.04473 * (x-5.9)**2 - 0.009779 * (x-5.9)**3
+        Fb[mask4]=0.2130 * (x-5.9)**2 + 0.1207 * (x-5.9)**3
+
+        x=1./(wave[mask3]*1.0e-4)
+        y=x-1.82
+
+        a[mask3]=1.752 - 0.316 * x - 0.104/((x-4.67)**2 + 0.341) + Fa[mask3]
+        b[mask3]=-3.090 + 1.825 * x + 1.206/((x-4.62)**2 + 0.263) + Fb[mask3]
+
+        Alam = Av*(a+b/Rv)
+        elam = 10**(-0.4 * Alam)
+        if deredden: elam = 1./elam
+
+        sp = S.ArraySpectrum(wave, elam, fluxunits='count')
+
+        return(sp)
 
     def create_blackbody(self, lum, temp):
         if np.isnan(temp): temp=0.0
@@ -194,6 +283,30 @@ class sedmachine(object):
 
         return(bb)
 
+    def generate_villar_model(self, parameters={}):
+        P = {
+            'mass': 0.023,
+            'kappa': 0.5,
+            'velocity': 0.256,
+        }
+
+        P.update(parameters)
+
+        kappa = P['kappa']
+        mass = P['mass']
+        velo = P['velocity']
+        if 'tfloor' in P.keys():
+            tfloor = P['tfloor']
+        else:
+            tfloor = None
+
+        luminosity = rprocess.rprocess_luminosity(self.times, 
+            mass, velo, kappa)
+        temperature = rprocess.temperature(self.times,
+            mass, velo, kappa, tfloor=tfloor)
+
+        return(luminosity, temperature)
+
     def load_villar_2comp_model(self, parameters={}):
         """
         Generate analytic Villar et al. (2017) spectral models and transform
@@ -201,7 +314,6 @@ class sedmachine(object):
         Uses a 2 component model.
         """
 
-        # Generic, 0.05 Msun purple kilonova model with velocity = 0.15c
         P = {
             'mass1': 0.023,
             'kappa1': 0.5,
@@ -224,9 +336,9 @@ class sedmachine(object):
         else:
             tfloor1 = None
 
-        luminosity1 = villar_kilonova_model.rprocess_luminosity(self.times, 
+        luminosity1 = rprocess.rprocess_luminosity(self.times, 
             mass, velo, kappa)
-        temperature1 = villar_kilonova_model.temperature(self.times,
+        temperature1 = rprocess.temperature(self.times,
             mass, velo, kappa, tfloor=tfloor1)
 
         kappa = P['kappa2']
@@ -237,9 +349,9 @@ class sedmachine(object):
         else:
             tfloor2 = None
 
-        luminosity2 = villar_kilonova_model.rprocess_luminosity(self.times, 
+        luminosity2 = rprocess.rprocess_luminosity(self.times, 
             mass, velo, kappa)
-        temperature2 = villar_kilonova_model.temperature(self.times,
+        temperature2 = rprocess.temperature(self.times,
             mass, velo, kappa, tfloor=tfloor2)
 
         # Now create spectral luminosity using blackbodies
@@ -296,9 +408,9 @@ class sedmachine(object):
         else:
             tfloor1 = None
 
-        luminosity1 = villar_kilonova_model.rprocess_luminosity(self.times, 
+        luminosity1 = rprocess.rprocess_luminosity(self.times, 
             mass, velo, kappa)
-        temperature1 = villar_kilonova_model.temperature(self.times,
+        temperature1 = rprocess.temperature(self.times,
             mass, velo, kappa, tfloor=tfloor1)
 
         kappa = P['kappa2']
@@ -309,9 +421,9 @@ class sedmachine(object):
         else:
             tfloor2 = None
 
-        luminosity2 = villar_kilonova_model.rprocess_luminosity(self.times, 
+        luminosity2 = rprocess.rprocess_luminosity(self.times, 
             mass, velo, kappa)
-        temperature2 = villar_kilonova_model.temperature(self.times,
+        temperature2 = rprocess.temperature(self.times,
             mass, velo, kappa, tfloor=tfloor2)
 
         kappa = P['kappa3']
@@ -322,9 +434,9 @@ class sedmachine(object):
         else:
             tfloor3 = None
 
-        luminosity3 = villar_kilonova_model.rprocess_luminosity(self.times, 
+        luminosity3 = rprocess.rprocess_luminosity(self.times, 
             mass, velo, kappa)
-        temperature3 = villar_kilonova_model.temperature(self.times,
+        temperature3 = rprocess.temperature(self.times,
             mass, velo, kappa, tfloor=tfloor3)
 
         # Now create spectral luminosity using blackbodies
@@ -373,11 +485,15 @@ class sedmachine(object):
         kappa = P['kappa']
         mass = P['mass']
         velo = P['velocity']
+        if 'tfloor' in P.keys():
+            tfloor = P['tfloor']
+        else:
+            tfloor = None
 
-        luminosity = villar_kilonova_model.rprocess_luminosity(self.times, 
+        luminosity = rprocess.rprocess_luminosity(self.times, 
             mass, velo, kappa)
-        temperature = villar_kilonova_model.temperature(self.times,
-            mass, velo, kappa)
+        temperature = rprocess.temperature(self.times,
+            mass, velo, kappa, tfloor=tfloor)
 
         # Now create spectral luminosity using blackbodies
         self.nu      = None
@@ -588,207 +704,238 @@ class sedmachine(object):
         # Load default filters first
         filters = self.filters
         message = 'Loading {source} bandpasses...'
-        print(message.format(source='wfc3,uvis'))
-        for bp in filters['hst']['wfc3,uvis1']:
-            name = 'wfc3,uvis1,'+bp
-            add_name = name.replace(',','_')
-            if passbands:
-                if name not in passbands.keys():
-                    continue
-            if instruments:
-                if 'wfc3_uvis' not in instruments:
-                    continue
-            bpmodel = S.ObsBandpass(name)
-            self.bandpass[add_name] = bpmodel
-            self.bandpass_names.append(add_name)
-        print(message.format(source='wfc3,ir'))
-        for bp in filters['hst']['wfc3,ir']:
-            name = 'wfc3,ir,'+bp
-            add_name = name.replace(',','_')
-            if passbands:
-                if name not in passbands.keys():
-                    continue
-            if instruments:
-                if 'wfc3_ir' not in instruments:
-                    continue
-            bpmodel = S.ObsBandpass(name)
-            self.bandpass[add_name] = bpmodel
-            self.bandpass_names.append(add_name)
-        print(message.format(source='acs,wfc'))
-        for bp in filters['hst']['acs']['wfc']:
-            name = 'acs,wfc1,'+bp
-            add_name = name.replace(',','_')
-            if passbands:
-                if name not in passbands.keys():
-                    continue
-            if instruments:
-                if 'acs_wfc' not in instruments:
-                    continue
-            bpmodel = S.ObsBandpass(name)
-            self.bandpass[add_name] = bpmodel
-            self.bandpass_names.append(add_name)
-        print(message.format(source='acs,sbc'))
-        for bp in filters['hst']['acs']['sbc']:
-            name = 'acs,sbc,'+bp
-            add_name = name.replace(',','_')
-            if passbands:
-                if name not in passbands.keys():
-                    continue
-            if instruments:
-                if 'acs_sbc' not in instruments:
-                    continue
-            bpmodel = S.ObsBandpass(name)
-            self.bandpass[add_name] = bpmodel
-            self.bandpass_names.append(add_name)
-        print(message.format(source='jwst,nircam'))
-        for bp in filters['jwst']['nircam']:
-            name = 'jwst,nircam,'+bp
-            add_name = name.replace(',','_')
-            if passbands:
-                if name not in passbands.keys():
-                    continue
-            if instruments:
-                if 'jwst_nircam' not in instruments:
-                    continue
-            bpmodel = self.get_jwst_filters(name)
-            self.bandpass[add_name] = bpmodel
-            self.bandpass_names.append(add_name)
-        print(message.format(source='jwst,miri'))
-        for bp in filters['jwst']['miri']:
-            name = 'jwst,miri,'+bp
-            add_name = name.replace(',','_')
-            if passbands:
-                if name not in passbands.keys():
-                    continue
-            if instruments:
-                if 'jwst_miri' not in instruments:
-                    continue
-            bpmodel = self.get_jwst_filters(name)
-            self.bandpass[add_name] = bpmodel
-            self.bandpass_names.append(add_name)
-        print(message.format(source='swift,uvot'))
-        for bp in filters['swift']['uvot']:
-            file = self.options['dirs']['filter']+'/SWIFT.'+bp.upper()+'.dat'
-            name = 'swift,uvot,'+bp
-            name = name.replace(',','_')
-            if passbands:
-                if name not in passbands.keys():
-                    continue
-            if instruments:
-                if 'swift_uvot' not in instruments:
-                    continue
-            wave,transmission = np.loadtxt(file, unpack=True)
-            bpmodel = S.ArrayBandpass(wave, transmission,
-                name=name, waveunits='Angstrom')
-            self.bandpass[name] = bpmodel
-            self.bandpass_names.append(name)
-        print(message.format(source='johnson'))
-        for bp in filters['johnson']:
-            name = 'johnson,'+bp
-            add_name = name.replace(',','_')
-            if passbands:
-                if name not in passbands.keys():
-                    continue
-            if instruments:
-                if 'johnson' not in instruments:
-                    continue
-            bpmodel = S.ObsBandpass(name)
-            self.bandpass[add_name] = bpmodel
-            self.bandpass_names.append(add_name)
-        print(message.format(source='sdss'))
-        for bp in filters['sdss']:
-            name = 'sdss,'+bp
-            if passbands:
-                if name not in passbands.keys():
-                    continue
-            if instruments:
-                if 'sdss' not in instruments:
-                    continue
-            bpmodel = S.ObsBandpass(name)
-            add_name = name.replace(',','_')
-            self.bandpass[add_name] = bpmodel
-            self.bandpass_names.append(add_name)
-        for bp in filters['kpno']:
-            name = 'kpno,'+bp
-            if passbands:
-                if name not in passbands.keys():
-                    continue
-            if instruments:
-                if 'kpno' not in instruments:
-                    continue
-            bpmodel = S.ObsBandpass(name)
-            add_name = name.replace(',','_')
-            self.bandpass[add_name] = bpmodel
-            self.bandpass_names.append(add_name)
-        print(message.format(source='kpno'))
-        for bp in filters['ps1']:
-            name = 'PS1,'+bp
-            if passbands:
-                if name not in passbands.keys():
-                    continue
-            if instruments:
-                if 'ps1' not in instruments:
-                    continue
-            file = os.path.join(self.options['dirs']['filter'],
-                f'PS1.GPC1.{bp}.dat')
-            wave,transmission = np.loadtxt(file, unpack=True)
-            add_name = name.replace(',','_')
-            bpmodel = S.ArrayBandpass(wave, transmission,
-                name=add_name, waveunits='Angstrom')
-            self.bandpass[add_name] = bpmodel
-            self.bandpass_names.append(add_name)
-        print(message.format(source='PS1'))
-        for bp in filters['atlas']:
-            name = 'ATLAS,'+bp
-            if passbands:
-                if name not in passbands.keys():
-                    continue
-            if instruments:
-                if 'ps1' not in instruments:
-                    continue
-            file = os.path.join(self.options['dirs']['filter'],
-                f'ATLAS.{bp}.dat')
-            wave,transmission = np.loadtxt(file, unpack=True)
-            add_name = name.replace(',','_')
-            bpmodel = S.ArrayBandpass(wave, transmission,
-                name=add_name, waveunits='Angstrom')
-            self.bandpass[add_name] = bpmodel
-            self.bandpass_names.append(add_name)
-        print(message.format(source='ATLAS'))
-        for bp in filters['ukirt']:
-            name = 'ukirt,'+bp
-            if passbands:
-                if name not in passbands.keys():
-                    continue
-            if instruments:
-                if 'ukirt' not in instruments:
-                    continue
-            file = os.path.join(self.options['dirs']['filter'],
-                f'UKIRT.{bp}.dat')
-            wave,transmission = np.loadtxt(file, unpack=True)
-            add_name = name.replace(',','_')
-            bpmodel = S.ArrayBandpass(wave, transmission,
-                name=add_name, waveunits='Angstrom')
-            self.bandpass[add_name] = bpmodel
-            self.bandpass_names.append(add_name)
-        print(message.format(source='UKIRT'))
-        for bp in filters['clear']:
-            name = bp
-            if passbands:
-                if name not in passbands.keys():
-                    continue
-            if instruments:
-                if 'clear' not in instruments:
-                    continue
-            file = os.path.join(self.options['dirs']['filter'],
-                f'clear.dat')
-            wave,transmission = np.loadtxt(file, unpack=True)
-            add_name = name.replace(',','_')
-            bpmodel = S.ArrayBandpass(wave, transmission,
-                name=add_name, waveunits='Angstrom')
-            self.bandpass[add_name] = bpmodel
-            self.bandpass_names.append(add_name)
-        print(message.format(source='Clear'))
+        if 'hst' in filters.keys() and 'wfc3,uvis1' in filters['hst'].keys():
+            print(message.format(source='wfc3,uvis'))
+            for bp in filters['hst']['wfc3,uvis1']:
+                name = 'wfc3,uvis1,'+bp
+                add_name = name.replace(',','_')
+                if passbands:
+                    if name not in passbands.keys():
+                        continue
+                if instruments:
+                    if 'wfc3_uvis' not in instruments:
+                        continue
+                bpmodel = S.ObsBandpass(name)
+                self.bandpass[add_name] = bpmodel
+                self.bandpass_names.append(add_name)
+        if 'hst' in filters.keys() and 'wfc3,ir' in filters['hst'].keys():
+            print(message.format(source='wfc3,ir'))
+            for bp in filters['hst']['wfc3,ir']:
+                name = 'wfc3,ir,'+bp
+                add_name = name.replace(',','_')
+                if passbands:
+                    if name not in passbands.keys():
+                        continue
+                if instruments:
+                    if 'wfc3_ir' not in instruments:
+                        continue
+                bpmodel = S.ObsBandpass(name)
+                self.bandpass[add_name] = bpmodel
+                self.bandpass_names.append(add_name)
+        if 'hst' in filters.keys() and 'acs,wfc' in filters['hst'].keys():
+            print(message.format(source='acs,wfc'))
+            for bp in filters['hst']['acs']['wfc']:
+                name = 'acs,wfc1,'+bp
+                add_name = name.replace(',','_')
+                if passbands:
+                    if name not in passbands.keys():
+                        continue
+                if instruments:
+                    if 'acs_wfc' not in instruments:
+                        continue
+                bpmodel = S.ObsBandpass(name)
+                self.bandpass[add_name] = bpmodel
+                self.bandpass_names.append(add_name)
+        if 'hst' in filters.keys() and 'acs,sbc' in filters['hst'].keys():
+            print(message.format(source='acs,sbc'))
+            for bp in filters['hst']['acs']['sbc']:
+                name = 'acs,sbc,'+bp
+                add_name = name.replace(',','_')
+                if passbands:
+                    if name not in passbands.keys():
+                        continue
+                if instruments:
+                    if 'acs_sbc' not in instruments:
+                        continue
+                bpmodel = S.ObsBandpass(name)
+                self.bandpass[add_name] = bpmodel
+                self.bandpass_names.append(add_name)
+        if 'jwst' in filters.keys() and 'nircam' in filters['jwst'].keys():
+            print(message.format(source='jwst,nircam'))
+            for bp in filters['jwst']['nircam']:
+                name = 'jwst,nircam,'+bp
+                add_name = name.replace(',','_')
+                if passbands:
+                    if name not in passbands.keys():
+                        continue
+                if instruments:
+                    if 'jwst_nircam' not in instruments:
+                        continue
+                bpmodel = self.get_jwst_filters(name)
+                self.bandpass[add_name] = bpmodel
+                self.bandpass_names.append(add_name)
+        if 'jwst' in filters.keys() and 'miri' in filters['jwst'].keys():
+            print(message.format(source='jwst,miri'))
+            for bp in filters['jwst']['miri']:
+                name = 'jwst,miri,'+bp
+                add_name = name.replace(',','_')
+                if passbands:
+                    if name not in passbands.keys():
+                        continue
+                if instruments:
+                    if 'jwst_miri' not in instruments:
+                        continue
+                bpmodel = self.get_jwst_filters(name)
+                self.bandpass[add_name] = bpmodel
+                self.bandpass_names.append(add_name)
+        if 'swift' in filters.keys():
+            print(message.format(source='swift,uvot'))
+            for bp in filters['swift']:
+                file = self.options['dirs']['filter']+'/SWIFT.'+bp.upper()+'.dat'
+                name = 'swift,uvot,'+bp
+                name = name.replace(',','_')
+                if passbands:
+                    if name not in passbands.keys():
+                        continue
+                if instruments:
+                    if 'swift_uvot' not in instruments:
+                        continue
+                wave,transmission = np.loadtxt(file, unpack=True)
+                bpmodel = S.ArrayBandpass(wave, transmission,
+                    name=name, waveunits='Angstrom')
+                self.bandpass[name] = bpmodel
+                self.bandpass_names.append(name)
+        if 'swope' in filters.keys():
+            print(message.format(source='swope'))
+            for bp in filters['swope']:
+                file = self.options['dirs']['filter']+'/SWOPE.'+bp+'.dat'
+                name = 'swope,'+bp
+                name = name.replace(',','_')
+                if passbands:
+                    if name not in passbands.keys():
+                        continue
+                if instruments:
+                    if 'swift_uvot' not in instruments:
+                        continue
+                wave,transmission = np.loadtxt(file, unpack=True)
+                bpmodel = S.ArrayBandpass(wave, transmission,
+                    name=name, waveunits='Angstrom')
+                self.bandpass[name] = bpmodel
+                self.bandpass_names.append(name)
+        if 'johnson' in filters.keys():
+            print(message.format(source='johnson'))
+            for bp in filters['johnson']:
+                name = 'johnson,'+bp
+                add_name = name.replace(',','_')
+                if passbands:
+                    if name not in passbands.keys():
+                        continue
+                if instruments:
+                    if 'johnson' not in instruments:
+                        continue
+                bpmodel = S.ObsBandpass(name)
+                self.bandpass[add_name] = bpmodel
+                self.bandpass_names.append(add_name)
+        if 'sdss' in filters.keys():
+            print(message.format(source='sdss'))
+            for bp in filters['sdss']:
+                name = 'sdss,'+bp
+                if passbands:
+                    if name not in passbands.keys():
+                        continue
+                if instruments:
+                    if 'sdss' not in instruments:
+                        continue
+                bpmodel = S.ObsBandpass(name)
+                add_name = name.replace(',','_')
+                self.bandpass[add_name] = bpmodel
+                self.bandpass_names.append(add_name)
+        if 'kpno' in filters.keys():
+            print(message.format(source='kpno'))
+            for bp in filters['kpno']:
+                name = 'kpno,'+bp
+                if passbands:
+                    if name not in passbands.keys():
+                        continue
+                if instruments:
+                    if 'kpno' not in instruments:
+                        continue
+                bpmodel = S.ObsBandpass(name)
+                add_name = name.replace(',','_')
+                self.bandpass[add_name] = bpmodel
+                self.bandpass_names.append(add_name)
+        if 'ps1' in filters.keys():
+            print(message.format(source='PS1'))
+            for bp in filters['ps1']:
+                name = 'PS1,'+bp
+                if passbands:
+                    if name not in passbands.keys():
+                        continue
+                if instruments:
+                    if 'ps1' not in instruments:
+                        continue
+                file = os.path.join(self.options['dirs']['filter'],
+                    f'PS1.GPC1.{bp}.dat')
+                wave,transmission = np.loadtxt(file, unpack=True)
+                add_name = name.replace(',','_')
+                bpmodel = S.ArrayBandpass(wave, transmission,
+                    name=add_name, waveunits='Angstrom')
+                self.bandpass[add_name] = bpmodel
+                self.bandpass_names.append(add_name)
+        if 'atlas' in filters.keys():
+            print(message.format(source='ATLAS'))
+            for bp in filters['atlas']:
+                name = 'ATLAS,'+bp
+                if passbands:
+                    if name not in passbands.keys():
+                        continue
+                if instruments:
+                    if 'ps1' not in instruments:
+                        continue
+                file = os.path.join(self.options['dirs']['filter'],
+                    f'ATLAS.{bp}.dat')
+                wave,transmission = np.loadtxt(file, unpack=True)
+                add_name = name.replace(',','_')
+                bpmodel = S.ArrayBandpass(wave, transmission,
+                    name=add_name, waveunits='Angstrom')
+                self.bandpass[add_name] = bpmodel
+                self.bandpass_names.append(add_name)
+        if 'ukirt' in filters.keys():
+            print(message.format(source='UKIRT'))
+            for bp in filters['ukirt']:
+                name = 'ukirt,'+bp
+                if passbands:
+                    if name not in passbands.keys():
+                        continue
+                if instruments:
+                    if 'ukirt' not in instruments:
+                        continue
+                file = os.path.join(self.options['dirs']['filter'],
+                    f'UKIRT.{bp}.dat')
+                wave,transmission = np.loadtxt(file, unpack=True)
+                add_name = name.replace(',','_')
+                bpmodel = S.ArrayBandpass(wave, transmission,
+                    name=add_name, waveunits='Angstrom')
+                self.bandpass[add_name] = bpmodel
+                self.bandpass_names.append(add_name)
+        if 'clear' in filters.keys():
+            print(message.format(source='Clear'))
+            for bp in filters['clear']:
+                name = bp
+                if passbands:
+                    if name not in passbands.keys():
+                        continue
+                if instruments:
+                    if 'clear' not in instruments:
+                        continue
+                file = os.path.join(self.options['dirs']['filter'],
+                    f'clear.dat')
+                wave,transmission = np.loadtxt(file, unpack=True)
+                add_name = name.replace(',','_')
+                bpmodel = S.ArrayBandpass(wave, transmission,
+                    name=add_name, waveunits='Angstrom')
+                self.bandpass[add_name] = bpmodel
+                self.bandpass_names.append(add_name)
 
         # Now if there are other passbands, load them individually
         # Must be formatted as dict with {name: filename}
@@ -904,19 +1051,47 @@ class sedmachine(object):
 
             model = {
                 'type': 'villar_3comp',
-                'mass1': 0.020,
+                'mass1': 0.017,
                 'kappa1': 0.5,
-                'velocity1': 0.266,
-                'tfloor1': 674,
-                'mass2': 0.047,
+                'velocity1': 0.282,
+                'tfloor1': 741,
+                'mass2': 0.038,
                 'kappa2': 3.0,
-                'velocity2': 0.152,
-                'tfloor2': 1308,
-                'mass3': 0.011,
+                'velocity2': 0.119,
+                'tfloor2': 1164,
+                'mass3': 0.013,
                 'kappa3': 10.0,
-                'velocity3': 0.137,
-                'tfloor3': 3745,
+                'velocity3': 0.133,
+                'tfloor3': 4145,
             }
+
+            model_list.append(model)
+
+        elif 'villar_gw170817_3comp_mod' in model_types:
+
+            model_file = os.path.join(self.options['dirs']['models'],
+                'villar_gw170817_3comp_mod.dat')
+
+            if os.path.exists(model_file):
+                with open(model_file,'r') as f:
+                    model = json.load(f)
+            else:
+                model = {
+                    'type': 'villar_3comp',
+                    'mass1': 0.0156,
+                    'kappa1': 0.5,
+                    'velocity1': 0.241,
+                    'tfloor1': 852,
+                    'mass2': 0.0441,
+                    'kappa2': 3.0,
+                    'velocity2': 0.125,
+                    'tfloor2': 1666,
+                    'mass3': 0.0083,
+                    'kappa3': 10.0,
+                    'velocity3': 0.13338,
+                    'tfloor3': 3837,
+                    'name': 'villar_gw170817_3comp_mcmc'
+                }
 
             model_list.append(model)
             
@@ -1172,6 +1347,7 @@ def main():
     kn.end_time = args.end_time
     kn.ntimes = args.ntimes
     kn.time_scale = args.time_scale
+    kn.clobber = args.clobber
 
     kn.create_time_array()
 
@@ -1184,7 +1360,8 @@ def main():
     kn.load_passbands(passbands=passbands,instruments=instruments)
 
     # Load models from model file - see example
-    params={'theta_obs': args.theta_obs * np.pi/180.0, 'kappa': args.kappa}
+    params={'theta_obs': args.theta_obs * np.pi/180.0, 'kappa': args.kappa,
+        'tfloor': args.tfloor,}
     all_models = []
     all_models += kn.find_models(model_types=args.models, params=params)
     all_models += kn.load_model_file(args.model_file)
@@ -1206,10 +1383,20 @@ def main():
 
         model_num = str(int(num)+1).zfill(4)
 
-        print(f'Working on model {model_num}/{nmodels}: {param_str}')
+        # Get model name and output file name
+        model_name = kn.get_model_name(kn.model_params)
+        outfile_name = os.path.join(kn.options['dirs']['tables'], 
+            kn.model_params['type'], model_name + '.dat')
+        if not os.path.exists(os.path.dirname(outfile_name)):
+            os.makedirs(os.path.dirname(outfile_name))
+
+        if os.path.exists(outfile_name) and not args.clobber:
+            print(f'Model {model_num}/{nmodels}: {outfile_name} exists...')
+            continue
+        else:
+            print(f'Model {model_num}/{nmodels}: {param_str}')
 
         kn.load_model(kn.model_params)
-        model_name = kn.get_model_name(kn.model_params)
 
         meta = ['{key} = {value}'.format(key=key, value=kn.model_params[key])
             for key in kn.model_params.keys()]
@@ -1241,12 +1428,6 @@ def main():
                 kn.phottables[model_name][bp][row_num] = mag
 
         # Now output phottable
-        outfile_name = os.path.join(kn.options['dirs']['tables'], 
-            kn.model_params['type'], model_name + '.dat')
-
-        if not os.path.exists(os.path.dirname(outfile_name)):
-            os.makedirs(os.path.dirname(outfile_name))
-
         formats = {'time': '{:<16}'}
         for bp in kn.bandpass_names:
             formats[bp] = '{:<24}'
