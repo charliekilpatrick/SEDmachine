@@ -96,8 +96,8 @@ def load_data(data_file, filts=['K','H','J','y','z','i','r','V','g','B']):
 
 
 data_file = os.path.join(parent_dir,"data","lightcurves","GW170817","GW170817.json")
-model_table_file = os.path.join(parent_dir,"output","tables","villar_3comp",
-    "villar_gw170817_3comp_mcmc.dat")
+model_table_file = os.path.join(parent_dir,"output","tables","villar_2comp",
+    "villar_2comp_0.0230_0.2560_0.5000_0.0230_0.2560_0.5000.dat")
 filts=['K','H','J','y','z','i','r','V','g','B']
 
 filt_map = {'K':'ukirt_K',
@@ -192,6 +192,9 @@ for i,filt in enumerate(filts):
 
     model_filt = filt_map[filt]
 
+    if model_filt not in model_table.keys():
+        continue
+
     time = all_data[filt]['time']
     mag = all_data[filt]['mag']
     magerr = all_data[filt]['magerr']
@@ -261,4 +264,4 @@ ax[0].legend(fontsize=1.5*figsize,ncols=2)
 
 plt.tight_layout()
 
-plt.savefig(os.path.join(parent_dir, 'plots', 'rprocess_model.png'))
+plt.savefig(os.path.join(parent_dir, 'output', 'plots', 'rprocess_model.png'))
