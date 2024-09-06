@@ -1,4 +1,4 @@
-astropy==5.2.2
+astropy==5.3.3
 h5py==3.8.0
 matplotlib==3.7.1
 numpy==1.24.3
